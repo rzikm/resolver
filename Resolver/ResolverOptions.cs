@@ -4,20 +4,20 @@ namespace Test.Net
 {
     public class ResolverOptions
     {
-        public IPAddress[] Servers;
+        public IPEndPoint[] Servers;
         public string DefaultDomain = string.Empty;
         public string[]? SearchDomains;
         public bool CacheResults = true;
         public bool UseHostsFile;
 
-        public ResolverOptions(IPAddress[] servers)
+        public ResolverOptions(IPEndPoint[] servers)
         {
             Servers = servers;
         }
 
-        public ResolverOptions(IPAddress server)
+        public ResolverOptions(IPEndPoint server)
         {
-            Servers = new IPAddress[]{ server };
+            Servers = new IPEndPoint[]{ server };
         }
     }
 }

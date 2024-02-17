@@ -1,8 +1,6 @@
 ﻿// See https://aka.ms/new-console-template for more information
 using Test.Net;
 
-
-
 //var r = new Resolver(IPAddress.Parse("8.8.8.8"));
 var r = new Resolver();
 

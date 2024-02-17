@@ -1,0 +1,18 @@
+$ORIGIN address.test.
+@	3600 IN	SOA sns.dns.icann.org. noc.dns.icann.org. (
+				2017042745 ; serial
+				7200       ; refresh (2 hours)
+				3600       ; retry (1 hour)
+				1209600    ; expire (2 weeks)
+				3600       ; minimum (1 hour)
+				)
+
+	7   IN A     1.2.3.4
+    42  IN AAAA  aaaa:bbbb:cccc:dddd:eeee:ffff:0000:6666
+
+www 666 IN A	 10.20.30.40
+www 666 IN A	 10.20.30.41
+www 666 IN A	 10.20.30.42
+www 666 IN A	 10.20.30.43
+
+

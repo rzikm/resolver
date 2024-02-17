@@ -3,6 +3,7 @@ using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
@@ -12,7 +13,7 @@ namespace Test.Net
 {
 
 
-    public class Resolver
+    public class Resolver : IDisposable
     {
         private const int MaximumNameLength = 253;
         private const int IPv4Length = 4;
@@ -98,7 +99,7 @@ namespace Test.Net
             }
         }
 
-        private IPAddress _nextServer;
+        private IPEndPoint _nextServer;
         private Socket _server;
         private Random _rnd = new Random();
         private ResolverOptions _options;
@@ -138,7 +139,7 @@ namespace Test.Net
                 _options = OperatingSystem.IsWindows() ? NetworkInfo.GetOptions() : ResolvConf.GetOptions();
                 _nextServer = _options.Servers[0];
                 _server = new Socket(_nextServer.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
-                _server.Connect(_nextServer, 53);
+                _server.Connect(_nextServer);
             }
             catch (Exception ex)
             {
@@ -152,14 +153,14 @@ namespace Test.Net
 
             _nextServer = _options.Servers[0];
             _server = new Socket(_nextServer.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
-            _server.Connect(_nextServer, 53);
+            _server.Connect(_nextServer);
         }
 
-        public Resolver(IEnumerable<IPAddress> servers) : this(new ResolverOptions(servers.ToArray<IPAddress>()))
+        public Resolver(IEnumerable<IPEndPoint> servers) : this(new ResolverOptions(servers.ToArray()))
         {
         }
 
-        public Resolver(IPAddress address) : this(new ResolverOptions(address))
+        public Resolver(IPEndPoint server) : this(new ResolverOptions(server))
         {
         }
 
@@ -471,5 +472,7 @@ namespace Test.Net
 
             return index - offset;
         }
+
+        public void Dispose() => _server?.Dispose();
     }
 }

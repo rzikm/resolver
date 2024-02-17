@@ -11,7 +11,7 @@ namespace Test.Net
         public static ResolverOptions GetOptions()
         {
             IPGlobalProperties computerProperties = IPGlobalProperties.GetIPGlobalProperties();
-            Collection<IPAddress> servers = new Collection<IPAddress>();
+            List<IPEndPoint> servers = new List<IPEndPoint>();
 
             foreach (NetworkInterface nic in NetworkInterface.GetAllNetworkInterfaces())
             {
@@ -22,15 +22,16 @@ namespace Test.Net
                 {
                     foreach (IPAddress server in properties.DnsAddresses)
                     {
-                        if (!servers.Contains(server))
+                        IPEndPoint ep = new IPEndPoint(server, 53);
+                        if (!servers.Contains(ep))
                         {
-                            servers.Add(server);
+                            servers.Add(ep);
                         }
                     }
                 }
             }
 
-            return new ResolverOptions(servers!.ToArray<IPAddress>());
+            return new ResolverOptions(servers!.ToArray());
         }
     }
 }

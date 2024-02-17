@@ -1,0 +1,12 @@
+address.test:1053 {
+    file /zones/address.test
+    errors
+    log
+}
+
+.:1053 {
+#    forward . 10.50.50.50
+    whoami
+    errors
+    log
+}
