@@ -1,6 +1,6 @@
 $ORIGIN address.test.
 @	3600 IN	SOA foo. bar. (
-				2017042745 ; serial
+				1		   ; serial
 				7200       ; refresh (2 hours)
 				3600       ; retry (1 hour)
 				1209600    ; expire (2 weeks)
@@ -8,9 +8,9 @@ $ORIGIN address.test.
 				)
 
 	7   IN A     1.2.3.4
-    42  IN AAAA  aaaa:bbbb:cccc:dddd:eeee:ffff:0000:6666
+    42  IN AAAA  abcd::1234
 
-www 666 IN A	 10.20.30.40
-www 666 IN A	 10.20.30.41
-www 666 IN A	 10.20.30.42
-www 666 IN A	 10.20.30.43
+www 0 IN A	 10.20.30.40
+www 1 IN A	 10.20.30.41
+www 2 IN A	 10.20.30.42
+www 3 IN A	 10.20.30.43

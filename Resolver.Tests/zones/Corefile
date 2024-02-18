@@ -4,6 +4,12 @@ address.test:1053 {
     log
 }
 
+srv.test:1053 {
+    file /zones/srv.test
+    errors
+    log
+}
+
 .:1053 {
 #    forward . 10.50.50.50
     whoami

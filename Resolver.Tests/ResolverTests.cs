@@ -22,36 +22,59 @@ namespace Test.Net
         public async Task ResolveIPAddress_External(AddressFamily addressFamily)
         {
             using Resolver resolver = new Resolver();
-            Resolver.AddressResult[] addresses = await resolver.ResolveIPAddress("example.com", addressFamily);
+            AddressResult[] addresses = await resolver.ResolveIPAddressAsync("example.com", addressFamily);
 
             Assert.NotEmpty(addresses);
             foreach (var a in addresses)
-            { 
+            {
                 Assert.Equal(addressFamily, a.Address.AddressFamily);
                 _output.WriteLine($"{a.Address}, TTL={a.Ttl}");
             }
         }
 
-        public static TheoryData<string, AddressFamily, (string, int)[]> ResolveIPAddress_Data = new()
+        public static TheoryData<string, AddressFamily, AddressResult[]> ResolveIPAddress_Data = new()
         {
-            {"address.test", AddressFamily.InterNetwork, [("1.2.3.4", 7)] }
+            {"address.test", AddressFamily.InterNetwork, [new(7, IPAddress.Parse("1.2.3.4"))] },
+            {"address.test", AddressFamily.InterNetworkV6, [new(42, IPAddress.Parse("abcd::1234"))] },
+            {"www.address.test", AddressFamily.InterNetwork, [
+                new(0, IPAddress.Parse("10.20.30.40")),
+                new(1, IPAddress.Parse("10.20.30.41")),
+                new(2, IPAddress.Parse("10.20.30.42")),
+                new(3, IPAddress.Parse("10.20.30.43")),] },
         };
 
         [Theory]
         [MemberData(nameof(ResolveIPAddress_Data))]
-        public async Task ResolveIPAddress(string hostName, AddressFamily addressFamily, (string, int)[] expected)
+        public async Task ResolveIPAddressAsync(string name, AddressFamily addressFamily, AddressResult[] expected)
         {
-            Resolver.AddressResult[] addresses = await _resolver.ResolveIPAddress(hostName, addressFamily);
-            
-            Assert.Equal(expected.Length, addresses.Length);
-            
-            for (int i = 0; i < expected.Length; i++)
-            {
-                Resolver.AddressResult a = addresses[i];
-                (string expectedAddress, int expectedTtl) = expected[i];
-                Assert.Equal(IPAddress.Parse(expectedAddress), a.Address);
-                Assert.Equal(expectedTtl, a.Ttl);
-            }
+            AddressResult[] result = await _resolver.ResolveIPAddressAsync(name, addressFamily);
+
+            Assert.Equal(expected, result);
+        }
+
+        //; _service._proto ttl IN SRV priority weight port target
+        //_s0._tcp		0 IN SRV 0 0 1000 a0.srv.test.
+        //_s1._udp		1 IN SRV 0 0 1001 a1.srv.test.
+        //_s2._tcp		2 IN SRV 0 0 1002 a2.srv.test.
+        //_s2._tcp		2 IN SRV 1 0 1002 xx.srv.test.
+        //_s3._tcp		3 IN SRV 0 0 1003 xx.srv.test.
+        //_s3._tcp		3 IN SRV 1 1 1003 yy.srv.test.
+        //_s3._tcp		3 IN SRV 1 2 1003 zz.srv.test.
+
+        public static TheoryData<string, ServiceResult[]> ResolveServiceAsync_Basic_Data = new()
+        {
+            { "_s0._tcp.srv.test", [new(0,0,0,1000, "a0.srv.test")] },
+            { "_s1._udp.srv.test", [new(1,0,0,1001, "a1.srv.test")] },
+            { "_s2._tcp.srv.test", [new(2,0,0,1002, "a2.srv.test"), new(2,1,0,1002,"xx.srv.test")] },
+            { "_s3._tcp.srv.test", [new(3,0,0,1003, "xx.srv.test"), new(3,1,1,1003,"yy.srv.test"), new(3,1,2,1003,"zz.srv.test") ] },
+        };
+
+        [Theory]
+        [MemberData(nameof(ResolveServiceAsync_Basic_Data))]
+        public async Task ResolveServiceAsync_Basic(string name, ServiceResult[] expected)
+        {
+            ServiceResult[] result = await _resolver.ResolveServiceAsync(name);
+            Assert.Equal(expected, result);
         }
 
         public void Dispose() => _resolver.Dispose();

@@ -11,6 +11,32 @@ using System.Text;
 
 namespace Test.Net
 {
+    [Flags]
+    internal enum QueryFlags : byte
+    {
+        Recursion = 1
+    }
+
+    internal enum QueryType
+    {
+        Address = 1,
+        NameServer = 2,
+        MailExchange = 15,
+        Text = 16,
+        IP6Address = 28,
+        Service = 33,
+        All = 255
+    }
+
+    internal enum QueryClass
+    {
+        Internet = 1
+    }
+
+    public record struct AddressResult(int Ttl, IPAddress Address);
+
+    public record struct ServiceResult(int Ttl, int Priority, int Weight, int Port, string Target);
+
     public class Resolver : IDisposable
     {
         private const int MaximumNameLength = 253;
@@ -19,28 +45,6 @@ namespace Test.Net
         private const int HeaderSize = 12;
         private const int RecordHeaderLength = 10;
         private const byte DotValue = 46;
-
-        [Flags]
-        private enum QueryFlags : byte
-        {
-            Recursion = 1
-        }
-
-        private enum QueryType
-        {
-            Address = 1,
-            NameServer = 2,
-            MailExchange = 15,
-            Text = 16,
-            IP6Address = 28,
-            Service = 33,
-            All = 255
-        }
-
-        private enum QueryClass
-        {
-            Internet = 1
-        }
 
         // RFC 1035 4.1.1. Header section format
         private struct Header
@@ -96,30 +100,9 @@ namespace Test.Net
         }
 
         private IPEndPoint _serverEndPoint;
-        private Socket _udpSocket;
+        private Socket _socket;
         private Random _rnd = new Random();
         private ResolverOptions _options;
-
-        public struct AddressResult
-        {
-            public IPAddress Address;
-            public int Ttl;
-        }
-
-        public struct ServiceResult
-        {
-            public int Port;
-            public int Priority;
-            public string Target;
-            public int Ttl;
-            public int Weight;
-        }
-
-        private struct ServiceResultCacheRecord
-        {
-            public ServiceResult[] ServiceResult;
-            public long Expires;
-        }
 
         public Resolver() : this(OperatingSystem.IsWindows() ? NetworkInfo.GetOptions() : ResolvConf.GetOptions())
         {
@@ -130,8 +113,8 @@ namespace Test.Net
             _options = options;
 
             _serverEndPoint = _options.Servers[0];
-            _udpSocket = new Socket(_serverEndPoint.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
-            _udpSocket.Connect(_serverEndPoint);
+            _socket = new Socket(_serverEndPoint.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
+            _socket.Connect(_serverEndPoint);
         }
 
         public Resolver(IEnumerable<IPEndPoint> servers) : this(new ResolverOptions(servers.ToArray()))
@@ -142,7 +125,7 @@ namespace Test.Net
         {
         }
 
-        public async ValueTask<AddressResult[]> ResolveIPAddress(string name, AddressFamily addressFamily)
+        public async ValueTask<AddressResult[]> ResolveIPAddressAsync(string name, AddressFamily addressFamily)
         {
             if (addressFamily != AddressFamily.InterNetwork && addressFamily != AddressFamily.InterNetworkV6 && addressFamily != AddressFamily.Unspecified)
             {
@@ -151,8 +134,7 @@ namespace Test.Net
 
             // TODO name checks.
 
-            //var response = Cache.Lookup(name, addressFamily);
-            var _buffer = ArrayPool<byte>.Shared.Rent(255);
+            byte[] _buffer = ArrayPool<byte>.Shared.Rent(255);
             try
             {
 
@@ -163,8 +145,8 @@ namespace Test.Net
                 int size = EncodeQuery(buffer.Span.Slice(HeaderSize), name, queryType);
 
                 // retransmit ????
-                await _udpSocket.SendAsync(buffer.Slice(0, HeaderSize + size), default);
-                int readLength = await _udpSocket.ReceiveAsync(buffer);
+                await _socket.SendAsync(buffer.Slice(0, HeaderSize + size), default);
+                int readLength = await _socket.ReceiveAsync(buffer);
 
                 Console.WriteLine("Received {0} bytes of data", readLength);
 
@@ -176,9 +158,9 @@ namespace Test.Net
             }
         }
 
-        public async ValueTask<ServiceResult[]> ResolveService(string name)
+        public async ValueTask<ServiceResult[]> ResolveServiceAsync(string name)
         {
-            var _buffer = ArrayPool<byte>.Shared.Rent(255);
+            byte[] _buffer = ArrayPool<byte>.Shared.Rent(255);
             try
             {
 
@@ -188,8 +170,8 @@ namespace Test.Net
                 int size = EncodeQuery(buffer.Span.Slice(HeaderSize), name, QueryType.Service);
 
                 // retransmit ????
-                await _udpSocket.SendAsync(buffer.Slice(0, HeaderSize + size), default);
-                int readLength = await _udpSocket.ReceiveAsync(buffer);
+                await _socket.SendAsync(buffer.Slice(0, HeaderSize + size), default);
+                int readLength = await _socket.ReceiveAsync(buffer);
 
                 Console.WriteLine("Received {0} bytes of data", readLength);
 
@@ -427,6 +409,6 @@ namespace Test.Net
             return index - offset;
         }
 
-        public void Dispose() => _udpSocket?.Dispose();
+        public void Dispose() => _socket?.Dispose();
     }
 }

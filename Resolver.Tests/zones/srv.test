@@ -1,0 +1,23 @@
+$ORIGIN srv.test.
+@	3600 IN	SOA foo. bar. (
+				1 ; serial
+				7200       ; refresh (2 hours)
+				3600       ; retry (1 hour)
+				1209600    ; expire (2 weeks)
+				3600       ; minimum (1 hour)
+				)
+
+a1	0   IN A     192.168.1.1
+a1	0   IN A     192.168.1.2
+a2	0   IN A     192.168.2.1
+
+; _service._proto ttl IN SRV priority weight port target
+_s0._tcp		0 IN SRV 0 0 1000 a0.srv.test.
+_s1._udp		1 IN SRV 0 0 1001 a1.srv.test.
+_s2._tcp		2 IN SRV 0 0 1002 a2.srv.test.
+_s2._tcp		2 IN SRV 1 0 1002 xx.srv.test.
+_s3._tcp		3 IN SRV 0 0 1003 xx.srv.test.
+_s3._tcp		3 IN SRV 1 1 1003 yy.srv.test.
+_s3._tcp		3 IN SRV 1 2 1003 zz.srv.test.
+
+_example._tcp	0 IN SRV 0 5 6666 example.com.
