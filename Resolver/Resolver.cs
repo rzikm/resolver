@@ -158,7 +158,7 @@ namespace Test.Net
             }
         }
 
-        public async ValueTask<ServiceResult[]> ResolveServiceAsync(string name)
+        public async ValueTask<(ServiceResult[], AddressResult[]?)> ResolveServiceAsync(string name, bool includeAddresses = false)
         {
             byte[] _buffer = ArrayPool<byte>.Shared.Rent(255);
             try
@@ -177,7 +177,7 @@ namespace Test.Net
 
                 ServiceResult[] result = (ServiceResult[])ProcessResponse(new Span<byte>(_buffer, 0, readLength), QueryType.Service);
 
-                return result;
+                return (result, null);
             }
             finally
             {

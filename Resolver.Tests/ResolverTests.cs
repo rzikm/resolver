@@ -61,20 +61,39 @@ namespace Test.Net
         //_s3._tcp		3 IN SRV 1 1 1003 yy.srv.test.
         //_s3._tcp		3 IN SRV 1 2 1003 zz.srv.test.
 
-        public static TheoryData<string, ServiceResult[]> ResolveServiceAsync_Basic_Data = new()
+        public static TheoryData<string, ServiceResult[]> ResolveServiceAsync_Data = new()
         {
             { "_s0._tcp.srv.test", [new(0,0,0,1000, "a0.srv.test")] },
             { "_s1._udp.srv.test", [new(1,0,0,1001, "a1.srv.test")] },
             { "_s2._tcp.srv.test", [new(2,0,0,1002, "a2.srv.test"), new(2,1,0,1002,"xx.srv.test")] },
-            { "_s3._tcp.srv.test", [new(3,0,0,1003, "xx.srv.test"), new(3,1,1,1003,"yy.srv.test"), new(3,1,2,1003,"zz.srv.test") ] },
+            { "_s3._tcp.srv.test", [new(3,0,0,1003, "xx.srv.test"), new(3,1,1,6666,"xx.srv.test"), new(3,1,2,1003,"yy.srv.test") ] },
+        };
+
+        //a1	1   IN A     192.168.1.1
+        //a1	2   IN A     192.168.1.2
+        //a2	3   IN A     192.168.1.3
+        public static TheoryData<string, ServiceResult[], AddressResult[]> ResolveServiceAsync_WithAddresses_Data = new()
+        {
+            { "_s0._tcp.srv.test", [new(0,0,0,1000, "a0.srv.test")], [] },
+            { "_s1._udp.srv.test", [new(1,0,0,1001, "a1.srv.test")], [new(1, IPAddress.Parse("192.168.1.1")), new(2, IPAddress.Parse("192.168.1.2"))] },
+            { "_s2._tcp.srv.test", [new(2,0,0,1002, "a2.srv.test"), new(2,1,0,1002,"xx.srv.test")], [new(3, IPAddress.Parse("192.168.1.3"))] },
         };
 
         [Theory]
-        [MemberData(nameof(ResolveServiceAsync_Basic_Data))]
-        public async Task ResolveServiceAsync_Basic(string name, ServiceResult[] expected)
+        [MemberData(nameof(ResolveServiceAsync_Data))]
+        public async Task ResolveServiceAsync(string name, ServiceResult[] expected)
         {
-            ServiceResult[] result = await _resolver.ResolveServiceAsync(name);
+            (ServiceResult[] result, _) = await _resolver.ResolveServiceAsync(name);
             Assert.Equal(expected, result);
+        }
+
+        [Theory]
+        [MemberData(nameof(ResolveServiceAsync_WithAddresses_Data))]
+        public async Task ResolveServiceAsync_WithAddresses(string name, ServiceResult[] expectedSrv, AddressResult[] expectedAddr)
+        {
+            (ServiceResult[] srv, AddressResult[]? addr) = await _resolver.ResolveServiceAsync(name, includeAddresses: true);
+            Assert.Equal(expectedSrv, srv);
+            Assert.Equal(expectedAddr, addr);
         }
 
         public void Dispose() => _resolver.Dispose();
