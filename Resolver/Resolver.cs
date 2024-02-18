@@ -11,8 +11,6 @@ using System.Text;
 
 namespace Test.Net
 {
-
-
     public class Resolver : IDisposable
     {
         private const int MaximumNameLength = 253;
@@ -21,7 +19,6 @@ namespace Test.Net
         private const int HeaderSize = 12;
         private const int RecordHeaderLength = 10;
         private const byte DotValue = 46;
-        private readonly ASCIIEncoding s_ascii = new ASCIIEncoding();
 
         [Flags]
         private enum QueryFlags : byte
@@ -44,7 +41,6 @@ namespace Test.Net
         {
             Internet = 1
         }
-
 
         // RFC 1035 4.1.1. Header section format
         private struct Header
@@ -99,12 +95,11 @@ namespace Test.Net
             }
         }
 
-        private IPEndPoint _nextServer;
-        private Socket _server;
+        private IPEndPoint _serverEndPoint;
+        private Socket _udpSocket;
         private Random _rnd = new Random();
         private ResolverOptions _options;
 
-        private ConcurrentDictionary<string, ServiceResultCacheRecord>? _serviceRecordCache;
         public struct AddressResult
         {
             public IPAddress Address;
@@ -125,35 +120,18 @@ namespace Test.Net
             public ServiceResult[] ServiceResult;
             public long Expires;
         }
-        public struct Response
-        {
-            public IPAddress? Address;
-            public int Ttl;
-            int ErrorCode;
-        }
 
-        public Resolver()
+        public Resolver() : this(OperatingSystem.IsWindows() ? NetworkInfo.GetOptions() : ResolvConf.GetOptions())
         {
-            try
-            {
-                _options = OperatingSystem.IsWindows() ? NetworkInfo.GetOptions() : ResolvConf.GetOptions();
-                _nextServer = _options.Servers[0];
-                _server = new Socket(_nextServer.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
-                _server.Connect(_nextServer);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine(ex);
-            }
         }
 
         public Resolver(ResolverOptions options)
         {
             _options = options;
 
-            _nextServer = _options.Servers[0];
-            _server = new Socket(_nextServer.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
-            _server.Connect(_nextServer);
+            _serverEndPoint = _options.Servers[0];
+            _udpSocket = new Socket(_serverEndPoint.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
+            _udpSocket.Connect(_serverEndPoint);
         }
 
         public Resolver(IEnumerable<IPEndPoint> servers) : this(new ResolverOptions(servers.ToArray()))
@@ -185,8 +163,8 @@ namespace Test.Net
                 int size = EncodeQuery(buffer.Span.Slice(HeaderSize), name, queryType);
 
                 // retransmit ????
-                await _server.SendAsync(buffer.Slice(0, HeaderSize + size), default);
-                int readLength = await _server.ReceiveAsync(buffer);
+                await _udpSocket.SendAsync(buffer.Slice(0, HeaderSize + size), default);
+                int readLength = await _udpSocket.ReceiveAsync(buffer);
 
                 Console.WriteLine("Received {0} bytes of data", readLength);
 
@@ -200,16 +178,6 @@ namespace Test.Net
 
         public async ValueTask<ServiceResult[]> ResolveService(string name)
         {
-            if (_options.CacheResults && _serviceRecordCache?.TryGetValue(name, out ServiceResultCacheRecord record) == true)
-            {
-                // TBD update expiration or change Ttl to be absolute value.
-                return record.ServiceResult;
-            } 
-            else
-            {
-                Console.WriteLine("Cache lookup failed");
-            } 
-
             var _buffer = ArrayPool<byte>.Shared.Rent(255);
             try
             {
@@ -220,26 +188,12 @@ namespace Test.Net
                 int size = EncodeQuery(buffer.Span.Slice(HeaderSize), name, QueryType.Service);
 
                 // retransmit ????
-                await _server.SendAsync(buffer.Slice(0, HeaderSize + size), default);
-                int readLength = await _server.ReceiveAsync(buffer);
+                await _udpSocket.SendAsync(buffer.Slice(0, HeaderSize + size), default);
+                int readLength = await _udpSocket.ReceiveAsync(buffer);
 
                 Console.WriteLine("Received {0} bytes of data", readLength);
 
                 ServiceResult[] result = (ServiceResult[])ProcessResponse(new Span<byte>(_buffer, 0, readLength), QueryType.Service);
-                if (_options.CacheResults && result.Length > 0)
-                {
-                    if (_serviceRecordCache == null)
-                    {
-                        _serviceRecordCache = new ConcurrentDictionary<string, ServiceResultCacheRecord>();
-                    }
-
-                    //ServiceResultCacheRecord record;
-                    record.ServiceResult = result;
-                    // TBD should we cache minimal record? Servers seems to normalize TTL anyway.
-                    record.Expires = Environment.TickCount64 + result[0].Ttl * TimeSpan.TicksPerSecond;
-                    _serviceRecordCache.AddOrUpdate(name, record, (key, oldValue) => record);
-                    Console.WriteLine("adder SRV record to cache!!!");
-                }
 
                 return result;
             }
@@ -261,7 +215,7 @@ namespace Test.Net
 
         private int EncodeName(Span<byte> buffer, string name)
         {
-            int length = s_ascii.GetBytes(name, buffer.Slice(1));
+            int length = Encoding.ASCII.GetBytes(name, buffer.Slice(1));
             buffer[length + 1] = 0; // last label
             Span<byte> nameBuffer = buffer.Slice(0, length + 1);
             while (true)
@@ -446,7 +400,7 @@ namespace Test.Net
                 }
             }
 
-            return length > 0 ? s_ascii.GetString(name.Slice(0, length - 1)) : string.Empty;
+            return length > 0 ? Encoding.ASCII.GetString(name.Slice(0, length - 1)) : string.Empty;
         }
 
         private int SkipName(Span<byte> buffer, int offset)
@@ -473,6 +427,6 @@ namespace Test.Net
             return index - offset;
         }
 
-        public void Dispose() => _server?.Dispose();
+        public void Dispose() => _udpSocket?.Dispose();
     }
 }

@@ -1,5 +1,5 @@
 $ORIGIN address.test.
-@	3600 IN	SOA sns.dns.icann.org. noc.dns.icann.org. (
+@	3600 IN	SOA foo. bar. (
 				2017042745 ; serial
 				7200       ; refresh (2 hours)
 				3600       ; retry (1 hour)
@@ -14,5 +14,3 @@ www 666 IN A	 10.20.30.40
 www 666 IN A	 10.20.30.41
 www 666 IN A	 10.20.30.42
 www 666 IN A	 10.20.30.43
-
-

@@ -7,7 +7,6 @@ namespace Test.Net
         public IPEndPoint[] Servers;
         public string DefaultDomain = string.Empty;
         public string[]? SearchDomains;
-        public bool CacheResults = true;
         public bool UseHostsFile;
 
         public ResolverOptions(IPEndPoint[] servers)
