@@ -11,7 +11,7 @@ srv.test:53 {
 }
 
 .:53 {
-#    forward . 10.50.50.50
+    forward . /etc/resolv.conf
     whoami
     errors
     log
