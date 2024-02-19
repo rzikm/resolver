@@ -1,4 +1,5 @@
 
+using System;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
@@ -6,8 +7,11 @@ using System.Diagnostics;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection.PortableExecutable;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
+using System.Xml.Linq;
 
 namespace Test.Net
 {
@@ -49,42 +53,45 @@ namespace Test.Net
         // RFC 1035 4.1.1. Header section format
         private struct Header
         {
+            private static readonly Random s_rnd = new Random();
+
             internal ushort TransactionId;
             private byte _lowFlags;
             private byte _highFlags;
-            internal short _queryCount;
-            internal short _answerCount;
-            internal ushort NameServerCount;
-            internal ushort AdditionalRecordCount;
+            
+            // TODO: These values are unsigned according to the RFC. Implement proper encoding/decoding methods.
+            private short _queryCount;
+            private short _answerCount;
+            private short _authorityCount;
+            private short _additionalRecordCount;
 
             internal short QueryCount
             {
-                get
-                {
-                    return IPAddress.NetworkToHostOrder(_queryCount);
-                }
-                set
-                {
-                    _queryCount = IPAddress.HostToNetworkOrder(value);
-                }
+                get => IPAddress.NetworkToHostOrder(_queryCount);
+                set => _queryCount = IPAddress.HostToNetworkOrder(value);
             }
+
             internal short AnswerCount
             {
-                get
-                {
-                    return IPAddress.NetworkToHostOrder(_answerCount);
-                }
-                set
-                {
-                    _answerCount = IPAddress.HostToNetworkOrder(value);
-                }
+                get => IPAddress.NetworkToHostOrder(_answerCount);
+                set => _answerCount = IPAddress.HostToNetworkOrder(value);
             }
+
+            internal short AuthorityCount
+            {
+                get => IPAddress.NetworkToHostOrder(_authorityCount);
+                set => _authorityCount = IPAddress.HostToNetworkOrder(value);
+            }
+
+            internal short AdditionalRecordCount
+            {
+                get => IPAddress.NetworkToHostOrder(_additionalRecordCount);
+                set => _additionalRecordCount = IPAddress.HostToNetworkOrder(value);
+            }
+
             internal bool Recursion
             {
-                get
-                {
-                    return (_lowFlags & (byte)QueryFlags.Recursion) != 0;
-                }
+                get => (_lowFlags & (byte)QueryFlags.Recursion) != 0;
                 set
                 {
                     if (value)
@@ -97,11 +104,18 @@ namespace Test.Net
                     }
                 }
             }
+
+            internal void InitQueryHeader()
+            {
+                this = default;
+                TransactionId = (ushort)s_rnd.Next(ushort.MaxValue);
+                Recursion = true;
+                QueryCount = 1;
+            }
         }
 
         private IPEndPoint _serverEndPoint;
         private Socket _socket;
-        private Random _rnd = new Random();
         private ResolverOptions _options;
 
         public Resolver() : this(OperatingSystem.IsWindows() ? NetworkInfo.GetOptions() : ResolvConf.GetOptions())
@@ -125,7 +139,31 @@ namespace Test.Net
         {
         }
 
-        public async ValueTask<AddressResult[]> ResolveIPAddressAsync(string name, AddressFamily addressFamily)
+        private delegate TResult ParseResponseDataDelegate<TResult>(Span<byte> buffer);
+
+        private async ValueTask<TResult> SendQueryAsync<TResult>(string name, QueryType queryType, ParseResponseDataDelegate<TResult> parseResponse, CancellationToken cancellationToken)
+        {
+            byte[] _buffer = ArrayPool<byte>.Shared.Rent(512);
+            try
+            {
+                Memory<byte> buffer = new Memory<byte>(_buffer);
+                int size = EncodeHeaderAndQuestion(buffer.Span, name, queryType);
+
+                // retransmit ????
+                await _socket.SendAsync(buffer.Slice(0, HeaderSize + size), cancellationToken);
+                int readLength = await _socket.ReceiveAsync(buffer, cancellationToken);
+
+                Log($"Received {readLength} bytes of data");
+
+                return parseResponse(new Span<byte>(_buffer, 0, readLength));
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(_buffer);
+            }
+        }
+
+        public ValueTask<AddressResult[]> ResolveIPAddressAsync(string name, AddressFamily addressFamily, CancellationToken cancellationToken = default)
         {
             if (addressFamily != AddressFamily.InterNetwork && addressFamily != AddressFamily.InterNetworkV6 && addressFamily != AddressFamily.Unspecified)
             {
@@ -133,69 +171,55 @@ namespace Test.Net
             }
 
             // TODO name checks.
+            QueryType queryType = addressFamily == AddressFamily.InterNetwork ? QueryType.Address : QueryType.IP6Address;
 
-            byte[] _buffer = ArrayPool<byte>.Shared.Rent(255);
-            try
+            return SendQueryAsync(name, queryType, ParseResponse, cancellationToken); 
+
+            static AddressResult[] ParseResponse(Span<byte> buffer)
             {
+                ref Header header = ref MemoryMarshal.AsRef<Header>(buffer);
+                Log($"T:{header.TransactionId} questions {header.QueryCount} Answers {header.AnswerCount} length {buffer.Length}");
+                int offset = SkipResponseQuestionSection(buffer, header.QueryCount);
+                var result = new AddressResult[header.AnswerCount];
+                int actualCount = ParseAddressRecords(buffer, offset, result);
 
-                Memory<byte> buffer = new Memory<byte>(_buffer);
-       
-                SetQueryHeader(MemoryMarshal.Cast<byte, Header>(buffer.Span));
-                QueryType queryType = addressFamily == AddressFamily.InterNetwork ? QueryType.Address : QueryType.IP6Address;
-                int size = EncodeQuery(buffer.Span.Slice(HeaderSize), name, queryType);
+                if (actualCount != result.Length)
+                {
+                    throw new Exception($"Invalid response: expected {result.Length} Address records, got {actualCount}.");
+                }
 
-                // retransmit ????
-                await _socket.SendAsync(buffer.Slice(0, HeaderSize + size), default);
-                int readLength = await _socket.ReceiveAsync(buffer);
-
-                Console.WriteLine("Received {0} bytes of data", readLength);
-
-                return (AddressResult[])ProcessResponse(new Span<byte>(_buffer, 0, readLength), queryType);
-            }
-            finally
-            {
-                ArrayPool<byte>.Shared.Return(_buffer);
+                return result;
             }
         }
 
-        public async ValueTask<(ServiceResult[], AddressResult[]?)> ResolveServiceAsync(string name, bool includeAddresses = false)
+        public ValueTask<(ServiceResult[], AddressResult[]?)> ResolveServiceAsync(string name, bool includeAddresses = false, CancellationToken cancellationToken = default)
         {
-            byte[] _buffer = ArrayPool<byte>.Shared.Rent(255);
-            try
+            return SendQueryAsync(name, QueryType.Service, ParseResponse, cancellationToken);
+
+            (ServiceResult[], AddressResult[]?) ParseResponse(Span<byte> buffer)
             {
+                ref Header header = ref MemoryMarshal.AsRef<Header>(buffer);
+                Log($"T:{header.TransactionId} questions {header.QueryCount} Answers {header.AnswerCount} length {buffer.Length}");
+                int offset = SkipResponseQuestionSection(buffer, header.QueryCount);
+                var result = new ServiceResult[header.AnswerCount];
+                int actualCount = ParseServiceRecords(buffer, result, offset);
+                if (actualCount != result.Length)
+                {
+                    throw new Exception($"Invalid response: expected {result.Length} SRV records, got {actualCount}.");
+                }
 
-                Memory<byte> buffer = new Memory<byte>(_buffer);
-                SetQueryHeader(MemoryMarshal.Cast<byte, Header>(buffer.Span));
-
-                int size = EncodeQuery(buffer.Span.Slice(HeaderSize), name, QueryType.Service);
-
-                // retransmit ????
-                await _socket.SendAsync(buffer.Slice(0, HeaderSize + size), default);
-                int readLength = await _socket.ReceiveAsync(buffer);
-
-                Console.WriteLine("Received {0} bytes of data", readLength);
-
-                ServiceResult[] result = (ServiceResult[])ProcessResponse(new Span<byte>(_buffer, 0, readLength), QueryType.Service);
-
-                return (result, null);
-            }
-            finally
-            {
-                ArrayPool<byte>.Shared.Return(_buffer);
+                if (includeAddresses)
+                {
+                    throw new NotImplementedException();
+                }
+                else
+                {
+                    return (result, null);
+                }
             }
         }
 
-        private int SetQueryHeader(Span<Header> header)
-        {
-            header.Clear();
-            header[0].TransactionId = (ushort)_rnd.Next(ushort.MaxValue);
-            header[0].Recursion = true;
-            header[0].QueryCount = 1;
-
-            return 12;
-        }
-
-        private int EncodeName(Span<byte> buffer, string name)
+        private static int EncodeName(Span<byte> buffer, string name)
         {
             int length = Encoding.ASCII.GetBytes(name, buffer.Slice(1));
             buffer[length + 1] = 0; // last label
@@ -218,15 +242,17 @@ namespace Test.Net
 
             return length + 2;
         }
-        private int EncodeQuery(Span<byte> buffer, string name, QueryType queryType)
+        private static int EncodeHeaderAndQuestion(Span<byte> buffer, string name, QueryType queryType)
         {
+            MemoryMarshal.AsRef<Header>(buffer).InitQueryHeader();
+            buffer = buffer.Slice(HeaderSize);
             int size = EncodeName(buffer, name);
             BinaryPrimitives.WriteInt16BigEndian(buffer.Slice(size), (short)queryType);
             BinaryPrimitives.WriteInt16BigEndian(buffer.Slice(size + 2), (short)QueryClass.Internet);
             return size + 4;
         }
 
-        private int ProcessResponseQueries(Span<byte> buffer, int count)
+        private static int SkipResponseQuestionSection(Span<byte> buffer, int count)
         {
             int offset = HeaderSize;
 
@@ -238,7 +264,7 @@ namespace Test.Net
                 int queryType = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(offset + len, 2));
                 int queryClass = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(offset + len + 2, 2));
 
-                //Console.WriteLine("Type = {0} class = {1}", queryType, queryClass);
+                Log($"SkipResponseQueries: type={queryType} class={queryClass} len={len}");
                 offset += len + 4;
                 count--;
             }
@@ -246,28 +272,38 @@ namespace Test.Net
             return offset;
         }
 
-        private object ProcessServiceRecord(Span<byte> buffer, int offset, int count)
+        private static (QueryType, uint, int) ReadRecordHeader(Span<byte> buffer, ref int offset)
         {
-            var response = new ServiceResult[count];
+            int nameLength = SkipName(buffer, offset);
+            offset += nameLength;
+
+            QueryType queryType = (QueryType)BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(offset, 2));
+            uint ttl = BinaryPrimitives.ReadUInt32BigEndian(buffer.Slice(offset + 4, 4));
+            int dataLength = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(offset + 8, 2));
+            offset += RecordHeaderLength;
+            
+            Log($"Type {queryType} ttl = {ttl} data {dataLength}");
+
+            return (queryType, ttl, dataLength);
+        }
+        
+        private static int ParseServiceRecords(Span<byte> buffer, Span<ServiceResult> result, int offset)
+        {
             int index = 0;
+            int count = result.Length;
             while (count > 0)
             {
-                int nameLength = SkipName(buffer, offset);
-                offset += nameLength;
+                (QueryType queryType, uint ttl, int dataLength) = ReadRecordHeader(buffer, ref offset);
 
-                QueryType queryType = (QueryType)BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(offset, 2));
-                int queryClass = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(offset + 2, 2));
-                uint ttl = BinaryPrimitives.ReadUInt32BigEndian(buffer.Slice(offset + 4, 4));
-                int dataLength = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(offset + 8, 2));
-                offset += RecordHeaderLength;
+                ref ServiceResult r = ref result[index];
 
                 if (queryType == QueryType.Service)
                 {
-                    response[index].Priority = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(offset, 2));
-                    response[index].Weight = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(offset + 2, 2));
-                    response[index].Port = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(offset + 4, 2));
-                    response[index].Ttl = (int)ttl;
-                    response[index].Target = DecodeName(buffer, offset + 6);
+                    r.Priority = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(offset, 2));
+                    r.Weight = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(offset + 2, 2));
+                    r.Port = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(offset + 4, 2));
+                    r.Ttl = (int)ttl;
+                    r.Target = DecodeName(buffer, offset + 6);
 
                     index++;
                 }
@@ -280,74 +316,46 @@ namespace Test.Net
                 count--;
             }
 
-            return response;
+            return index;
         }
 
-        private object ProcessResponse(Span<byte> buffer, QueryType _queryType)
+        private static void SkipRecords(Span<byte> buffer, ref int offset, int count)
         {
-            Span<Header> header = MemoryMarshal.Cast<byte, Header>(buffer);
-
-
-            Console.WriteLine(header[0].TransactionId);
-            Console.WriteLine("questions {0} Answers {1} length {2}", header[0].QueryCount, header[0].AnswerCount, buffer.Length);
-
-            int offset = ProcessResponseQueries(buffer, header[0].QueryCount);
-
-            if (_queryType == QueryType.Service)
-            {
-                return ProcessServiceRecord(buffer, offset, header[0].AnswerCount);
-            }
-            int count = header[0].AnswerCount;
-
-            var response = new AddressResult[count];
-            var index = 0;
             while (count > 0)
             {
-                Console.WriteLine("Processing answer {0} ot of {1}", count, header[0].AnswerCount);
                 int nameLength = SkipName(buffer, offset);
-                Console.WriteLine("Question name length = {0}", nameLength);
-                QueryType queryType = (QueryType)BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(offset + nameLength, 2));
-                int queryClass = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(offset + nameLength + 2, 2));
-                uint ttl = BinaryPrimitives.ReadUInt32BigEndian(buffer.Slice(offset + nameLength + 4, 4)); 
-                int dataLength = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(offset + nameLength + 8, 2));
+            }
+        }
 
-                Console.WriteLine("Type {0} class {1} ttl = {2} data {3}", queryType, queryClass, ttl, dataLength);
+        private static int ParseAddressRecords(Span<byte> buffer, int offset, Span<AddressResult> result)
+        {
+            var index = 0;
+            int count = result.Length;
+            while (count > 0)
+            {
+                Log($"Processing answer {count} of {result.Length}");
 
-                switch (queryType)
+                (QueryType queryType, uint ttl, int dataLength) = ReadRecordHeader(buffer, ref offset);
+
+                ref AddressResult r = ref result[index];
+
+                if (queryType is QueryType.Address or QueryType.IP6Address)
                 {
-                    case QueryType.Address:
-                        Debug.Assert(dataLength == 4);
-                        response[index].Address = new IPAddress(buffer.Slice(offset + nameLength + RecordHeaderLength, IPv4Length));
-                        response[index].Ttl = (int)ttl;
+                    Debug.Assert(queryType == QueryType.Address ? dataLength == 4 : dataLength == IPv6Length);
+                    r.Address = new IPAddress(buffer.Slice(offset, dataLength));
+                    r.Ttl = (int)ttl;
 
-                        index++;
-                        offset += nameLength + RecordHeaderLength + IPv4Length;
-                        count--;
-                        continue;
-                    //break;
-                    case QueryType.IP6Address:
-                        Debug.Assert(dataLength == IPv6Length);
-                        response[index].Address = new IPAddress(buffer.Slice(offset + nameLength + RecordHeaderLength, IPv6Length));
-                        response[index].Ttl = (int)ttl;
-
-                        index++;
-                        offset += nameLength + RecordHeaderLength + IPv6Length;
-                        count--;
-                        continue;
-                    case QueryType.Service:
-                    case QueryType.MailExchange:
-                    default:
-                        offset += nameLength + RecordHeaderLength + dataLength;
-                        break;
+                    index++;
                 }
-                
+
+                offset += dataLength;
                 count--;
             }
 
-            return response;
+            return index;
         }
 
-        private string DecodeName(Span<byte> buffer, int offset)
+        private static string DecodeName(Span<byte> buffer, int offset)
         {
             Span<byte> name = stackalloc byte[MaximumNameLength + 1];
             int length = 0;
@@ -385,7 +393,7 @@ namespace Test.Net
             return length > 0 ? Encoding.ASCII.GetString(name.Slice(0, length - 1)) : string.Empty;
         }
 
-        private int SkipName(Span<byte> buffer, int offset)
+        private static int SkipName(Span<byte> buffer, int offset)
         {
             int index = offset;
             while (true)
@@ -410,5 +418,10 @@ namespace Test.Net
         }
 
         public void Dispose() => _socket?.Dispose();
+
+        private static void Log(FormattableString str)
+        {
+            Console.WriteLine(str);
+        }
     }
 }
