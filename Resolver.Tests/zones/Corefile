@@ -10,6 +10,12 @@ srv.test:53 {
     log
 }
 
+trunc.test:53 {
+    file /zones/trunc.test
+    errors
+    log
+}
+
 .:53 {
     forward . /etc/resolv.conf
     whoami
