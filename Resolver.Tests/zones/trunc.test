@@ -7,6 +7,8 @@ $ORIGIN trunc.test.
 				3600       ; minimum (1 hour)
 				)
 
+x   0  IN A     9.8.7.6
+x   0  IN A     5.4.3.2
 x   0  IN AAAA  abcd::0000
 x   0  IN AAAA  abcd::0001
 x   0  IN AAAA  abcd::0002
