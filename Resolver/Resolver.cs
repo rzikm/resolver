@@ -181,7 +181,7 @@ namespace Test.Net
                 Log($"T:{header.TransactionId} questions {header.QueryCount} Answers {header.AnswerCount} length {buffer.Length}");
                 int offset = SkipResponseQuestionSection(buffer, header.QueryCount);
                 var result = new AddressResult[header.AnswerCount];
-                int actualCount = ParseAddressRecords(buffer, offset, result);
+                int actualCount = ParseAddressRecords(buffer, ref offset, result);
 
                 if (actualCount != result.Length)
                 {
@@ -202,7 +202,7 @@ namespace Test.Net
                 Log($"T:{header.TransactionId} questions {header.QueryCount} Answers {header.AnswerCount} length {buffer.Length}");
                 int offset = SkipResponseQuestionSection(buffer, header.QueryCount);
                 var result = new ServiceResult[header.AnswerCount];
-                int actualCount = ParseServiceRecords(buffer, result, offset);
+                int actualCount = ParseServiceRecords(buffer, ref offset, result);
                 if (actualCount != result.Length)
                 {
                     throw new Exception($"Invalid response: expected {result.Length} SRV records, got {actualCount}.");
@@ -210,7 +210,18 @@ namespace Test.Net
 
                 if (includeAddresses)
                 {
-                    throw new NotImplementedException();
+                    SkipRecords(buffer, ref offset, header.AuthorityCount);
+
+                    AddressResult[] addresses = new AddressResult[header.AdditionalRecordCount];
+                    actualCount = ParseAddressRecords(buffer, ref offset, addresses);
+                    
+                    // If there were non A/AAAA records in the additional section, shrink the array.
+                    if (actualCount < addresses.Length)
+                    {
+                        Array.Resize(ref addresses, actualCount);
+                    }
+
+                    return (result, addresses);
                 }
                 else
                 {
@@ -287,7 +298,7 @@ namespace Test.Net
             return (queryType, ttl, dataLength);
         }
         
-        private static int ParseServiceRecords(Span<byte> buffer, Span<ServiceResult> result, int offset)
+        private static int ParseServiceRecords(Span<byte> buffer, ref int offset, Span<ServiceResult> result)
         {
             int index = 0;
             int count = result.Length;
@@ -323,11 +334,13 @@ namespace Test.Net
         {
             while (count > 0)
             {
-                int nameLength = SkipName(buffer, offset);
+                (_, _, int dataLength) = ReadRecordHeader(buffer, ref offset);
+                offset += dataLength;
+                count--;
             }
         }
 
-        private static int ParseAddressRecords(Span<byte> buffer, int offset, Span<AddressResult> result)
+        private static int ParseAddressRecords(Span<byte> buffer, ref int offset, Span<AddressResult> result)
         {
             var index = 0;
             int count = result.Length;
