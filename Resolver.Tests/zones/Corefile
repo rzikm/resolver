@@ -1,16 +1,16 @@
-address.test:1053 {
+address.test:53 {
     file /zones/address.test
     errors
     log
 }
 
-srv.test:1053 {
+srv.test:53 {
     file /zones/srv.test
     errors
     log
 }
 
-.:1053 {
+.:53 {
 #    forward . 10.50.50.50
     whoami
     errors
