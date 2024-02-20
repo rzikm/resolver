@@ -16,6 +16,14 @@ trunc.test:53 {
     log
 }
 
+drop.test:53 {
+    erratic {
+        drop 2
+    }
+    errors
+    log
+}
+
 .:53 {
     forward . /etc/resolv.conf
     whoami
