@@ -16,9 +16,15 @@ using System.Xml.Linq;
 namespace Test.Net
 {
     [Flags]
-    internal enum QueryFlags : byte
+    internal enum QueryFlags : ushort
     {
-        Recursion = 1
+        IsCheckingDisabled = 0x0010,
+        IsAuthenticData = 0x0020,
+        RecursionAvailable = 0x0080,
+        RecursionDesired = 0x0100,
+        ResultTruncated = 0x0200,
+        HasAuthorityAnswer = 0x0400,
+        HasQuery = 0x8000,
     }
 
     internal enum QueryType
@@ -56,60 +62,69 @@ namespace Test.Net
             private static readonly Random s_rnd = new Random();
 
             internal ushort TransactionId;
-            private byte _lowFlags;
-            private byte _highFlags;
+            private ushort _flags;
             
             // TODO: These values are unsigned according to the RFC. Implement proper encoding/decoding methods.
-            private short _queryCount;
-            private short _answerCount;
-            private short _authorityCount;
-            private short _additionalRecordCount;
+            private ushort _queryCount;
+            private ushort _answerCount;
+            private ushort _authorityCount;
+            private ushort _additionalRecordCount;
 
-            internal short QueryCount
+            internal ushort QueryCount
             {
-                get => IPAddress.NetworkToHostOrder(_queryCount);
-                set => _queryCount = IPAddress.HostToNetworkOrder(value);
+                get => ReverseOrder(_queryCount);
+                set => _queryCount = ReverseOrder(value);
             }
 
-            internal short AnswerCount
+            internal ushort AnswerCount
             {
-                get => IPAddress.NetworkToHostOrder(_answerCount);
-                set => _answerCount = IPAddress.HostToNetworkOrder(value);
+                get => ReverseOrder(_answerCount);
+                set => _answerCount = ReverseOrder(value);
             }
 
-            internal short AuthorityCount
+            internal ushort AuthorityCount
             {
-                get => IPAddress.NetworkToHostOrder(_authorityCount);
-                set => _authorityCount = IPAddress.HostToNetworkOrder(value);
+                get => ReverseOrder(_authorityCount);
+                set => _authorityCount = ReverseOrder(value);
             }
 
-            internal short AdditionalRecordCount
+            internal ushort AdditionalRecordCount
             {
-                get => IPAddress.NetworkToHostOrder(_additionalRecordCount);
-                set => _additionalRecordCount = IPAddress.HostToNetworkOrder(value);
+                get => ReverseOrder(_additionalRecordCount);
+                set => _additionalRecordCount = ReverseOrder(value);
             }
 
-            internal bool Recursion
+            internal QueryFlags QueryFlags
             {
-                get => (_lowFlags & (byte)QueryFlags.Recursion) != 0;
+                get => (QueryFlags)ReverseOrder(_flags);
+                set => _flags = ReverseOrder((ushort)value);
+            }
+
+            internal bool RecursionDesired
+            {
+                get => (QueryFlags & QueryFlags.RecursionDesired) != 0;
                 set
                 {
                     if (value)
                     {
-                        _lowFlags |= (byte)QueryFlags.Recursion;
+                        QueryFlags |= QueryFlags.RecursionDesired;
                     }
                     else
                     {
-                        _lowFlags &= (byte)~QueryFlags.Recursion;
+                        QueryFlags &= ~QueryFlags.RecursionDesired;
                     }
                 }
             }
+
+            internal bool ResultTruncated => (QueryFlags & QueryFlags.ResultTruncated) != 0;
+
+            private static ushort ReverseOrder(ushort value) => BitConverter.IsLittleEndian ? BinaryPrimitives.ReverseEndianness(value) : value;
 
             internal void InitQueryHeader()
             {
                 this = default;
                 TransactionId = (ushort)s_rnd.Next(ushort.MaxValue);
-                Recursion = true;
+                RecursionDesired = true;
                 QueryCount = 1;
             }
         }
@@ -139,27 +154,35 @@ namespace Test.Net
         {
         }
 
-        private delegate TResult ParseResponseDataDelegate<TResult>(Span<byte> buffer);
+        private delegate TResult ParseResponseDataDelegate<TResult>(Span<byte> buffer, ref Header header);
 
-        private async ValueTask<TResult> SendQueryAsync<TResult>(string name, QueryType queryType, ParseResponseDataDelegate<TResult> parseResponse, CancellationToken cancellationToken)
+        private async ValueTask<TResult> SendQueryAsync<TResult>(string name, QueryType queryType, ParseResponseDataDelegate<TResult> parseResponseBody, CancellationToken cancellationToken)
         {
-            byte[] _buffer = ArrayPool<byte>.Shared.Rent(512);
+            byte[] buffer = ArrayPool<byte>.Shared.Rent(512);
             try
             {
-                Memory<byte> buffer = new Memory<byte>(_buffer);
-                int size = EncodeHeaderAndQuestion(buffer.Span, name, queryType);
+                Memory<byte> memory = new Memory<byte>(buffer);
+                int size = EncodeHeaderAndQuestion(buffer, name, queryType);
 
                 // retransmit ????
-                await _socket.SendAsync(buffer.Slice(0, HeaderSize + size), cancellationToken);
-                int readLength = await _socket.ReceiveAsync(buffer, cancellationToken);
+                await _socket.SendAsync(memory.Slice(0, HeaderSize + size), cancellationToken);
+                int readLength = await _socket.ReceiveAsync(memory, cancellationToken);
 
-                Log($"Received {readLength} bytes of data");
+                TResult? result = DoParseResponse(buffer.AsSpan(0, readLength), parseResponseBody);
 
-                return parseResponse(new Span<byte>(_buffer, 0, readLength));
+                return result is null ? throw new NotImplementedException("Truncated!") : result;
             }
             finally
             {
-                ArrayPool<byte>.Shared.Return(_buffer);
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+
+            static TResult? DoParseResponse(Span<byte> buffer, ParseResponseDataDelegate<TResult> parseResponseBody)
+            {
+                ref Header header = ref MemoryMarshal.AsRef<Header>(buffer);
+                Log($"T:{header.TransactionId} questions {header.QueryCount} Answers {header.AnswerCount} length {buffer.Length}");
+
+                return header.ResultTruncated ? default : parseResponseBody(buffer, ref header);
             }
         }
 
@@ -175,10 +198,8 @@ namespace Test.Net
 
             return SendQueryAsync(name, queryType, ParseResponse, cancellationToken); 
 
-            static AddressResult[] ParseResponse(Span<byte> buffer)
+            static AddressResult[] ParseResponse(Span<byte> buffer, ref Header header)
             {
-                ref Header header = ref MemoryMarshal.AsRef<Header>(buffer);
-                Log($"T:{header.TransactionId} questions {header.QueryCount} Answers {header.AnswerCount} length {buffer.Length}");
                 int offset = SkipResponseQuestionSection(buffer, header.QueryCount);
                 var result = new AddressResult[header.AnswerCount];
                 int actualCount = ParseAddressRecords(buffer, ref offset, result);
@@ -208,10 +229,8 @@ namespace Test.Net
         {
             return SendQueryAsync(name, QueryType.Service, ParseResponse, cancellationToken);
 
-            (ServiceResult[], AddressResult[]?) ParseResponse(Span<byte> buffer)
+            (ServiceResult[], AddressResult[]?) ParseResponse(Span<byte> buffer, ref Header header)
             {
-                ref Header header = ref MemoryMarshal.AsRef<Header>(buffer);
-                Log($"T:{header.TransactionId} questions {header.QueryCount} Answers {header.AnswerCount} length {buffer.Length}");
                 int offset = SkipResponseQuestionSection(buffer, header.QueryCount);
                 var result = new ServiceResult[header.AnswerCount];
                 int actualCount = ParseServiceRecords(buffer, ref offset, result);

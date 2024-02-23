@@ -96,6 +96,35 @@ namespace Test.Net
             Assert.Equal(expectedAddr, addr);
         }
 
+        [Fact]
+        public async Task ResolveIPAddressAsync_ResultSizeOver512()
+        {
+            AddressResult[] expected = [
+                new (0 , IPAddress.Parse("abcd::0000")),
+                new (1 , IPAddress.Parse("abcd::0001")),
+                new (2 , IPAddress.Parse("abcd::0002")),
+                new (3 , IPAddress.Parse("abcd::0003")),
+                new (4 , IPAddress.Parse("abcd::0004")),
+                new (5 , IPAddress.Parse("abcd::0005")),
+                new (6 , IPAddress.Parse("abcd::0006")),
+                new (7 , IPAddress.Parse("abcd::0007")),
+                new (8 , IPAddress.Parse("abcd::0008")),
+                new (9 , IPAddress.Parse("abcd::0009")),
+                new (10, IPAddress.Parse("abcd::0010")),
+                new (11, IPAddress.Parse("abcd::0011")),
+                new (12, IPAddress.Parse("abcd::0012")),
+                new (13, IPAddress.Parse("abcd::0013")),
+                new (14, IPAddress.Parse("abcd::0014")),
+                new (15, IPAddress.Parse("abcd::0015")),
+                new (16, IPAddress.Parse("abcd::0016")),
+                new (17, IPAddress.Parse("abcd::0017")),
+                new (18, IPAddress.Parse("abcd::0018")),
+                new (19, IPAddress.Parse("abcd::0019")),
+                ];
+            AddressResult[] actual = await _resolver.ResolveIPAddressAsync("x.trunc.test", AddressFamily.InterNetworkV6);
+            Assert.Equal(expected, actual);
+        }
+
         public void Dispose() => _resolver.Dispose();
     }
 }
