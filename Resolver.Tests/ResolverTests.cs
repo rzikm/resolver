@@ -83,7 +83,7 @@ namespace Test.Net
         [MemberData(nameof(ResolveServiceAsync_Data))]
         public async Task ResolveServiceAsync(string name, ServiceResult[] expected)
         {
-            (ServiceResult[] result, _) = await _resolver.ResolveServiceAsync(name);
+            ServiceResult[] result = await _resolver.ResolveServiceAsync(name);
             Assert.Equal(expected, result);
         }
 
@@ -91,7 +91,7 @@ namespace Test.Net
         [MemberData(nameof(ResolveServiceAsync_WithAddresses_Data))]
         public async Task ResolveServiceAsync_WithAddresses(string name, ServiceResult[] expectedSrv, AddressResult[] expectedAddr)
         {
-            (ServiceResult[] srv, AddressResult[]? addr) = await _resolver.ResolveServiceAsync(name, includeAddresses: true);
+            (ServiceResult[] srv, AddressResult[]? addr) = await _resolver.ResolveServiceAndAddressesAsync(name);
             Assert.Equal(expectedSrv, srv);
             Assert.Equal(expectedAddr, addr);
         }

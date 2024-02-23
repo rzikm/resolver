@@ -11,6 +11,9 @@ a1	1   IN A     192.168.1.1
 a1	2   IN A     192.168.1.2
 a2	3   IN A     192.168.1.3
 
+cn1 1   IN CNAME rofl.lol.
+cn2 1   IN CNAME lmao.lol.
+
 ; _service._proto ttl IN SRV priority weight port target
 _s0._tcp		0 IN SRV 0 0 1000 a0.srv.test.
 _s1._udp		1 IN SRV 0 0 1001 a1.srv.test.
@@ -19,5 +22,9 @@ _s2._tcp		2 IN SRV 1 0 1002 xx.srv.test.
 _s3._tcp		3 IN SRV 0 0 1003 xx.srv.test.
 _s3._tcp		3 IN SRV 1 1 6666 xx.srv.test.
 _s3._tcp		3 IN SRV 1 2 1003 yy.srv.test.
+
+_s4._tcp		4 IN SRV 0 0 1004 a1.srv.test.
+_s4._tcp		4 IN SRV 0 0 1004 cn1.srv.test.
+_s4._tcp		4 IN SRV 0 0 1004 cn2.srv.test.
 
 _example._tcp	0 IN SRV 0 5 6666 example.com.

@@ -192,7 +192,19 @@ namespace Test.Net
             }
         }
 
-        public ValueTask<(ServiceResult[], AddressResult[]?)> ResolveServiceAsync(string name, bool includeAddresses = false, CancellationToken cancellationToken = default)
+        public async ValueTask<ServiceResult[]> ResolveServiceAsync(string name, CancellationToken cancellationToken = default)
+            => (await ResolveServiceAsync(name, false, cancellationToken)).Item1;
+
+        // https://www.rfc-editor.org/rfc/rfc2782.html: "Implementors are urged, but not required, to return the address record(s) in the Additional Data section."
+        // If no matching addresses are found, an empty array is being returned.
+        public async ValueTask<(ServiceResult[] Services, AddressResult[] Addresses)> ResolveServiceAndAddressesAsync(string name, CancellationToken cancellationToken = default)
+        {
+            var result = await ResolveServiceAsync(name, true, cancellationToken);
+            Debug.Assert(result.Addresses != null);
+            return (result.Services, result.Addresses);
+        }
+
+        private ValueTask<(ServiceResult[] Services, AddressResult[]? Addresses)> ResolveServiceAsync(string name, bool includeAddresses, CancellationToken cancellationToken)
         {
             return SendQueryAsync(name, QueryType.Service, ParseResponse, cancellationToken);
 
@@ -210,6 +222,11 @@ namespace Test.Net
 
                 if (includeAddresses)
                 {
+                    if (header.AdditionalRecordCount == 0)
+                    {
+                        return (result, Array.Empty<AddressResult>());
+                    }
+
                     SkipRecords(buffer, ref offset, header.AuthorityCount);
 
                     AddressResult[] addresses = new AddressResult[header.AdditionalRecordCount];
