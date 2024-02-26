@@ -63,8 +63,7 @@ namespace Test.Net
 
             internal ushort TransactionId;
             private ushort _flags;
-            
-            // TODO: These values are unsigned according to the RFC. Implement proper encoding/decoding methods.
+
             private ushort _queryCount;
             private ushort _answerCount;
             private ushort _authorityCount;
@@ -72,32 +71,32 @@ namespace Test.Net
 
             internal ushort QueryCount
             {
-                get => ReverseOrder(_queryCount);
-                set => _queryCount = ReverseOrder(value);
+                get => ReverseByteOrder(_queryCount);
+                set => _queryCount = ReverseByteOrder(value);
             }
 
             internal ushort AnswerCount
             {
-                get => ReverseOrder(_answerCount);
-                set => _answerCount = ReverseOrder(value);
+                get => ReverseByteOrder(_answerCount);
+                set => _answerCount = ReverseByteOrder(value);
             }
 
             internal ushort AuthorityCount
             {
-                get => ReverseOrder(_authorityCount);
-                set => _authorityCount = ReverseOrder(value);
+                get => ReverseByteOrder(_authorityCount);
+                set => _authorityCount = ReverseByteOrder(value);
             }
 
             internal ushort AdditionalRecordCount
             {
-                get => ReverseOrder(_additionalRecordCount);
-                set => _additionalRecordCount = ReverseOrder(value);
+                get => ReverseByteOrder(_additionalRecordCount);
+                set => _additionalRecordCount = ReverseByteOrder(value);
             }
 
             internal QueryFlags QueryFlags
             {
-                get => (QueryFlags)ReverseOrder(_flags);
-                set => _flags = ReverseOrder((ushort)value);
+                get => (QueryFlags)ReverseByteOrder(_flags);
+                set => _flags = ReverseByteOrder((ushort)value);
             }
 
             internal bool RecursionDesired
@@ -117,8 +116,6 @@ namespace Test.Net
             }
 
             internal bool ResultTruncated => (QueryFlags & QueryFlags.ResultTruncated) != 0;
-
-            private static ushort ReverseOrder(ushort value) => BitConverter.IsLittleEndian ? BinaryPrimitives.ReverseEndianness(value) : value;
 
             internal void InitQueryHeader()
             {
@@ -159,23 +156,58 @@ namespace Test.Net
         private async ValueTask<TResult> SendQueryAsync<TResult>(string name, QueryType queryType, ParseResponseDataDelegate<TResult> parseResponseBody, CancellationToken cancellationToken)
         {
             byte[] buffer = ArrayPool<byte>.Shared.Rent(512);
+            byte[]? tcpBuffer = null;
             try
             {
+                // TODO: Implement UDP retries.
                 Memory<byte> memory = new Memory<byte>(buffer);
-                int size = EncodeHeaderAndQuestion(buffer, name, queryType);
-
-                // retransmit ????
-                await _socket.SendAsync(memory.Slice(0, HeaderSize + size), cancellationToken);
+                int questionSize = EncodeQuestion(buffer, name, queryType);
+                await _socket.SendAsync(memory.Slice(0, questionSize), cancellationToken);
                 int readLength = await _socket.ReceiveAsync(memory, cancellationToken);
 
                 TResult? result = DoParseResponse(buffer.AsSpan(0, readLength), parseResponseBody);
+
+                if (result is null)
+                {
+                    using Socket tcpSocket = new Socket(_serverEndPoint.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
+                    await tcpSocket.ConnectAsync(_serverEndPoint);
+
+                    // The TCP message is prefixed with the 2-byte length
+                    questionSize = EncodeQuestion(buffer.AsSpan(2), name, queryType);
+                    BinaryPrimitives.WriteUInt16BigEndian(buffer, (ushort)questionSize);
+
+                    await tcpSocket.SendAsync(memory.Slice(0, questionSize + 2), cancellationToken);
+
+                    readLength = await tcpSocket.ReceiveAsync(memory.Slice(0, 2), cancellationToken);
+                    Debug.Assert(readLength == 2); // TODO: implement robust reading
+
+                    // The TCP message is prefixed with the 2-byte length
+                    int responseSize = BinaryPrimitives.ReadUInt16BigEndian(buffer);
+                    tcpBuffer = ArrayPool<byte>.Shared.Rent(responseSize);
+                    memory = new Memory<byte>(tcpBuffer);
+
+                    readLength = await tcpSocket.ReceiveAsync(memory, cancellationToken);
+                    Debug.Assert(responseSize == readLength); // TODO: implement robust reading
+                    result = DoParseResponse(tcpBuffer.AsSpan(0, readLength), parseResponseBody);
+                    if (result is null)
+                    {
+                        throw new Exception("Invalid response!");
+                    }
+                    return result!;
+                }
 
                 return result is null ? throw new NotImplementedException("Truncated!") : result;
             }
             finally
             {
                 ArrayPool<byte>.Shared.Return(buffer);
+
+                if (tcpBuffer != null)
+                {
+                    ArrayPool<byte>.Shared.Return(tcpBuffer);
+                }
             }
+
 
             static TResult? DoParseResponse(Span<byte> buffer, ParseResponseDataDelegate<TResult> parseResponseBody)
             {
@@ -289,14 +321,14 @@ namespace Test.Net
 
             return length + 2;
         }
-        private static int EncodeHeaderAndQuestion(Span<byte> buffer, string name, QueryType queryType)
+        private static int EncodeQuestion(Span<byte> buffer, string name, QueryType queryType)
         {
             MemoryMarshal.AsRef<Header>(buffer).InitQueryHeader();
             buffer = buffer.Slice(HeaderSize);
             int size = EncodeName(buffer, name);
             BinaryPrimitives.WriteInt16BigEndian(buffer.Slice(size), (short)queryType);
             BinaryPrimitives.WriteInt16BigEndian(buffer.Slice(size + 2), (short)QueryClass.Internet);
-            return size + 4;
+            return size + 4 + HeaderSize;
         }
 
         private static int SkipResponseQuestionSection(Span<byte> buffer, int count)
@@ -472,5 +504,7 @@ namespace Test.Net
         {
             Console.WriteLine(str);
         }
+
+        private static ushort ReverseByteOrder(ushort value) => BitConverter.IsLittleEndian ? BinaryPrimitives.ReverseEndianness(value) : value;
     }
 }
