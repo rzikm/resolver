@@ -33,7 +33,7 @@ namespace Test.Net
                 throw new SocketException((int)SocketError.AddressNotAvailable);
             }
 
-            IPAddress[] serverList = new IPAddress[serverCount];
+            IPEndPoint[] serverList = new IPEndPoint[serverCount];
             var options = new ResolverOptions(serverList);
             if (domainCount > 0)
             {
@@ -47,7 +47,7 @@ namespace Test.Net
                 string[] tokens = line.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
                 if (tokens[0].Equals("nameserver"))
                 {
-                    options.Servers[serverCount] = IPAddress.Parse(tokens[1]);
+                    options.Servers[serverCount] = new IPEndPoint(IPAddress.Parse(tokens[1]), 53);
                     serverCount++;
                 }
                 else if (tokens[0].Equals("search"))
