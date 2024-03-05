@@ -125,6 +125,47 @@ namespace Test.Net
             Assert.Equal(expected, actual);
         }
 
+        public static TheoryData<string, (int Ttl, string[] Text)[]> ResolveTextAsync_Data = new()
+        {
+            { "t1.txt.test", [(1, ["test A"])] },
+            { "t2.txt.test", [(2, ["test B"]), (3, ["test C"])] },
+            { "multi1.txt.test", [(4, ["multi A", "multi B"])] },
+            { "multi2.txt.test", [(5, ["multi C", "multi D"]), (6, ["multi E", "multi F", "multi G"])] },
+        };  
+
+        [Theory]
+        [MemberData(nameof(ResolveTextAsync_Data))]
+        public async Task ResolveTextAsync(string name, (int Ttl, string[] Text)[] expected)
+        {
+            TxtResult[] result = await _resolver.ResolveTextAsync(name);
+            Assert.Equal(expected.Length, result.Length);
+
+            for (int i = 0; i < expected.Length; i++)
+            {
+                Assert.Equal(expected[i].Ttl, result[i].Ttl);
+                string[] actualText = result[i].GetText().ToArray();
+                Assert.Equal(expected[i].Text, actualText);
+            }
+        }
+
+        [Fact]
+        public async Task ResolveTextAsync_Large()
+        {
+            TxtResult[] result = await _resolver.ResolveTextAsync("large.txt.test");
+            Assert.Equal(220, result.Length);
+            foreach (TxtResult r in result)
+            {
+                Assert.Equal(256, r.Data.Length);
+            }
+        }
+
+        [Fact]
+        public async Task ResolveTextAsync_TcpTruncated()
+        {
+            Exception ex = await Assert.ThrowsAsync<Exception>(async () => { await _resolver.ResolveTextAsync("trunc-tcp.txt.test"); });
+            _output.WriteLine(ex.Message);
+        }
+
         public void Dispose() => _resolver.Dispose();
     }
 }

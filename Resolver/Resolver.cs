@@ -47,6 +47,21 @@ namespace Test.Net
 
     public record struct ServiceResult(int Ttl, int Priority, int Weight, int Port, string Target);
 
+    public record struct TxtResult(int Ttl, byte[] Data)
+    {
+        public IEnumerable<string> GetText() => GetText(Encoding.ASCII);
+
+        public IEnumerable<string> GetText(Encoding encoding)
+        {
+            for (int i = 0; i < Data.Length;)
+            {
+                int length = Data[i];
+                yield return encoding.GetString(Data, i + 1, length);
+                i += length + 1;
+            }
+        }
+    }
+
     public class Resolver : IDisposable
     {
         private const int MaximumNameLength = 253;
@@ -189,14 +204,9 @@ namespace Test.Net
                     readLength = await tcpSocket.ReceiveAsync(memory, cancellationToken);
                     Debug.Assert(responseSize == readLength); // TODO: implement robust reading
                     result = DoParseResponse(tcpBuffer.AsSpan(0, readLength), parseResponseBody);
-                    if (result is null)
-                    {
-                        throw new Exception("Invalid response!");
-                    }
-                    return result!;
                 }
 
-                return result is null ? throw new NotImplementedException("Truncated!") : result;
+                return result is null ? throw new Exception("Invalid response: Truncated TCP!") : result;
             }
             finally
             {
@@ -245,8 +255,27 @@ namespace Test.Net
             }
         }
 
+        public ValueTask<TxtResult[]> ResolveTextAsync(string name, CancellationToken cancellationToken = default)
+        {
+            return SendQueryAsync(name, QueryType.Text, ParseResponse, cancellationToken);
+
+            static TxtResult[] ParseResponse(Span<byte> buffer, ref Header header)
+            {
+                int offset = SkipResponseQuestionSection(buffer, header.QueryCount);
+                var result = new TxtResult[header.AnswerCount];
+                int actualCount = ParseTxtRecords(buffer, ref offset, result);
+
+                if (actualCount != result.Length)
+                {
+                    throw new Exception($"Invalid response: expected {result.Length} TXT records, got {actualCount}.");
+                }
+
+                return result;
+            }
+        }
+
         public async ValueTask<ServiceResult[]> ResolveServiceAsync(string name, CancellationToken cancellationToken = default)
-            => (await ResolveServiceAsync(name, false, cancellationToken)).Item1;
+            => (await ResolveServiceAsync(name, false, cancellationToken)).Services;
 
         // https://www.rfc-editor.org/rfc/rfc2782.html: "Implementors are urged, but not required, to return the address record(s) in the Additional Data section."
         // If no matching addresses are found, an empty array is being returned.
@@ -426,6 +455,31 @@ namespace Test.Net
                     r.Address = new IPAddress(buffer.Slice(offset, dataLength));
                     r.Ttl = (int)ttl;
 
+                    index++;
+                }
+
+                offset += dataLength;
+                count--;
+            }
+
+            return index;
+        }
+
+        private static int ParseTxtRecords(Span<byte> buffer, ref int offset, TxtResult[] result)
+        {
+            int index = 0;
+            int count = result.Length;
+            while (count > 0)
+            {
+                (QueryType queryType, uint ttl, int dataLength) = ReadRecordHeader(buffer, ref offset);
+
+                ref TxtResult r = ref result[index];
+
+                if (queryType is QueryType.Text)
+                {
+                    r.Ttl = (int)ttl;
+                    r.Data = new byte[dataLength];
+                    buffer.Slice(offset, dataLength).CopyTo(r.Data);
                     index++;
                 }
 
