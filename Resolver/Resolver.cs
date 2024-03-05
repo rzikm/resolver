@@ -74,9 +74,7 @@ namespace Test.Net
         // RFC 1035 4.1.1. Header section format
         private struct Header
         {
-            private static readonly Random s_rnd = new Random();
-
-            internal ushort TransactionId;
+            private ushort _transactionId;
             private ushort _flags;
 
             private ushort _queryCount;
@@ -108,6 +106,12 @@ namespace Test.Net
                 set => _additionalRecordCount = ReverseByteOrder(value);
             }
 
+            internal ushort TransactionId
+            {
+                get => ReverseByteOrder(_transactionId);
+                set => _transactionId = ReverseByteOrder(value);
+            }
+
             internal QueryFlags QueryFlags
             {
                 get => (QueryFlags)ReverseByteOrder(_flags);
@@ -135,14 +139,13 @@ namespace Test.Net
             internal void InitQueryHeader()
             {
                 this = default;
-                TransactionId = (ushort)s_rnd.Next(ushort.MaxValue);
+                TransactionId = (ushort)Random.Shared.Next(ushort.MaxValue);
                 RecursionDesired = true;
                 QueryCount = 1;
             }
         }
 
         private IPEndPoint _serverEndPoint;
-        private Socket _socket;
         private ResolverOptions _options;
 
         public Resolver() : this(OperatingSystem.IsWindows() ? NetworkInfo.GetOptions() : ResolvConf.GetOptions())
@@ -152,10 +155,7 @@ namespace Test.Net
         public Resolver(ResolverOptions options)
         {
             _options = options;
-
             _serverEndPoint = _options.Servers[0];
-            _socket = new Socket(_serverEndPoint.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
-            _socket.Connect(_serverEndPoint);
         }
 
         public Resolver(IEnumerable<IPEndPoint> servers) : this(new ResolverOptions(servers.ToArray()))
@@ -177,10 +177,14 @@ namespace Test.Net
                 // TODO: Implement UDP retries.
                 Memory<byte> memory = new Memory<byte>(buffer);
                 int questionSize = EncodeQuestion(buffer, name, queryType);
-                await _socket.SendAsync(memory.Slice(0, questionSize), cancellationToken);
-                int readLength = await _socket.ReceiveAsync(memory, cancellationToken);
+                ushort queryId = MemoryMarshal.AsRef<Header>(memory.Span).TransactionId;
 
-                TResult? result = DoParseResponse(buffer.AsSpan(0, readLength), parseResponseBody);
+                using Socket udpSocket = new(_serverEndPoint.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
+                udpSocket.Connect(_serverEndPoint);
+                await udpSocket.SendAsync(memory.Slice(0, questionSize), cancellationToken);
+                int readLength = await udpSocket.ReceiveAsync(memory, cancellationToken);
+
+                TResult? result = DoParseResponse(queryId, buffer.AsSpan(0, readLength), parseResponseBody);
 
                 if (result is null)
                 {
@@ -188,7 +192,8 @@ namespace Test.Net
                     await tcpSocket.ConnectAsync(_serverEndPoint);
 
                     // The TCP message is prefixed with the 2-byte length
-                    questionSize = EncodeQuestion(buffer.AsSpan(2), name, queryType);
+                    questionSize = EncodeQuestion(memory.Span[2..], name, queryType);
+                    queryId = MemoryMarshal.AsRef<Header>(memory.Span[2..]).TransactionId;
                     BinaryPrimitives.WriteUInt16BigEndian(buffer, (ushort)questionSize);
 
                     await tcpSocket.SendAsync(memory.Slice(0, questionSize + 2), cancellationToken);
@@ -206,7 +211,7 @@ namespace Test.Net
                         readLength = await tcpSocket.ReceiveAsync(memory.Slice(offset), cancellationToken);
                     }
 
-                    result = DoParseResponse(tcpBuffer.AsSpan(0, responseSize), parseResponseBody);
+                    result = DoParseResponse(queryId, tcpBuffer.AsSpan(0, responseSize), parseResponseBody);
                 }
 
                 return result is null ? throw new Exception("Invalid response: Truncated TCP!") : result;
@@ -222,10 +227,14 @@ namespace Test.Net
             }
 
 
-            static TResult? DoParseResponse(Span<byte> buffer, ParseResponseDataDelegate<TResult> parseResponseBody)
+            static TResult? DoParseResponse(ushort queryId, Span<byte> buffer, ParseResponseDataDelegate<TResult> parseResponseBody)
             {
                 ref Header header = ref MemoryMarshal.AsRef<Header>(buffer);
                 Log($"T:{header.TransactionId} questions {header.QueryCount} Answers {header.AnswerCount} length {buffer.Length}");
+                if (header.TransactionId != queryId)
+                {
+                    throw new Exception("Invalid response: TransactionId mismatch!");
+                }
 
                 return header.ResultTruncated ? default : parseResponseBody(buffer, ref header);
             }
@@ -507,14 +516,14 @@ namespace Test.Net
                     index++;
                     break;
                 }
-                else if ((buffer[index] & (byte)0xc0) == 0xc0)
+                else if ((buffer[index] & 0xc0) == 0xc0)
                 {
                     if (jumpOffset)
                     {
                         throw new Exception("ONLY ONE POINTER ALLOWED");
                     }
                     jumpOffset = true;
-                    index = (buffer[index] & (byte)0x3f) + buffer[index + 1];
+                    index = (buffer[index] & 0x3f) + buffer[index + 1];
                     continue;
                 }
                 else
@@ -555,7 +564,9 @@ namespace Test.Net
             return index - offset;
         }
 
-        public void Dispose() => _socket?.Dispose();
+        public void Dispose()
+        {
+        }
 
         private static void Log(FormattableString str)
         {
