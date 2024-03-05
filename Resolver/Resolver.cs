@@ -194,16 +194,19 @@ namespace Test.Net
                     await tcpSocket.SendAsync(memory.Slice(0, questionSize + 2), cancellationToken);
 
                     readLength = await tcpSocket.ReceiveAsync(memory.Slice(0, 2), cancellationToken);
-                    Debug.Assert(readLength == 2); // TODO: implement robust reading
+                    Assert(readLength == 2); // TODO: implement robust reading
 
                     // The TCP message is prefixed with the 2-byte length
                     int responseSize = BinaryPrimitives.ReadUInt16BigEndian(buffer);
                     tcpBuffer = ArrayPool<byte>.Shared.Rent(responseSize);
                     memory = new Memory<byte>(tcpBuffer);
 
-                    readLength = await tcpSocket.ReceiveAsync(memory, cancellationToken);
-                    Debug.Assert(responseSize == readLength); // TODO: implement robust reading
-                    result = DoParseResponse(tcpBuffer.AsSpan(0, readLength), parseResponseBody);
+                    for (int offset = 0; offset < responseSize; offset += readLength)
+                    {
+                        readLength = await tcpSocket.ReceiveAsync(memory.Slice(offset), cancellationToken);
+                    }
+
+                    result = DoParseResponse(tcpBuffer.AsSpan(0, responseSize), parseResponseBody);
                 }
 
                 return result is null ? throw new Exception("Invalid response: Truncated TCP!") : result;
@@ -282,7 +285,7 @@ namespace Test.Net
         public async ValueTask<(ServiceResult[] Services, AddressResult[] Addresses)> ResolveServiceAndAddressesAsync(string name, CancellationToken cancellationToken = default)
         {
             var result = await ResolveServiceAsync(name, true, cancellationToken);
-            Debug.Assert(result.Addresses != null);
+            Assert(result.Addresses != null);
             return (result.Services, result.Addresses);
         }
 
@@ -451,7 +454,7 @@ namespace Test.Net
 
                 if (queryType is QueryType.Address or QueryType.IP6Address)
                 {
-                    Debug.Assert(queryType == QueryType.Address ? dataLength == 4 : dataLength == IPv6Length);
+                    Assert(queryType == QueryType.Address ? dataLength == 4 : dataLength == IPv6Length);
                     r.Address = new IPAddress(buffer.Slice(offset, dataLength));
                     r.Ttl = (int)ttl;
 
@@ -557,6 +560,16 @@ namespace Test.Net
         private static void Log(FormattableString str)
         {
             Console.WriteLine(str);
+        }
+
+        private static void Assert(bool condition)
+        {
+            if (!condition)
+            {
+                throw new Exception("Assertion failed");
+            }
+
+            // Debug.Assert(condition);
         }
 
         private static ushort ReverseByteOrder(ushort value) => BitConverter.IsLittleEndian ? BinaryPrimitives.ReverseEndianness(value) : value;
