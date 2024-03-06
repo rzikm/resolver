@@ -47,6 +47,21 @@ namespace Test.Net
 
     public record struct ServiceResult(int Ttl, int Priority, int Weight, int Port, string Target);
 
+    public record struct TxtResult(int Ttl, byte[] Data)
+    {
+        public IEnumerable<string> GetText() => GetText(Encoding.ASCII);
+
+        public IEnumerable<string> GetText(Encoding encoding)
+        {
+            for (int i = 0; i < Data.Length;)
+            {
+                int length = Data[i];
+                yield return encoding.GetString(Data, i + 1, length);
+                i += length + 1;
+            }
+        }
+    }
+
     public class Resolver : IDisposable
     {
         private const int MaximumNameLength = 253;
@@ -59,9 +74,7 @@ namespace Test.Net
         // RFC 1035 4.1.1. Header section format
         private struct Header
         {
-            private static readonly Random s_rnd = new Random();
-
-            internal ushort TransactionId;
+            private ushort _transactionId;
             private ushort _flags;
 
             private ushort _queryCount;
@@ -93,6 +106,12 @@ namespace Test.Net
                 set => _additionalRecordCount = ReverseByteOrder(value);
             }
 
+            internal ushort TransactionId
+            {
+                get => ReverseByteOrder(_transactionId);
+                set => _transactionId = ReverseByteOrder(value);
+            }
+
             internal QueryFlags QueryFlags
             {
                 get => (QueryFlags)ReverseByteOrder(_flags);
@@ -120,14 +139,13 @@ namespace Test.Net
             internal void InitQueryHeader()
             {
                 this = default;
-                TransactionId = (ushort)s_rnd.Next(ushort.MaxValue);
+                TransactionId = (ushort)Random.Shared.Next(ushort.MaxValue);
                 RecursionDesired = true;
                 QueryCount = 1;
             }
         }
 
         private IPEndPoint _serverEndPoint;
-        private Socket _socket;
         private ResolverOptions _options;
 
         public Resolver() : this(OperatingSystem.IsWindows() ? NetworkInfo.GetOptions() : ResolvConf.GetOptions())
@@ -137,10 +155,7 @@ namespace Test.Net
         public Resolver(ResolverOptions options)
         {
             _options = options;
-
             _serverEndPoint = _options.Servers[0];
-            _socket = new Socket(_serverEndPoint.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
-            _socket.Connect(_serverEndPoint);
         }
 
         public Resolver(IEnumerable<IPEndPoint> servers) : this(new ResolverOptions(servers.ToArray()))
@@ -162,10 +177,14 @@ namespace Test.Net
                 // TODO: Implement UDP retries.
                 Memory<byte> memory = new Memory<byte>(buffer);
                 int questionSize = EncodeQuestion(buffer, name, queryType);
-                await _socket.SendAsync(memory.Slice(0, questionSize), cancellationToken);
-                int readLength = await _socket.ReceiveAsync(memory, cancellationToken);
+                ushort queryId = MemoryMarshal.AsRef<Header>(memory.Span).TransactionId;
 
-                TResult? result = DoParseResponse(buffer.AsSpan(0, readLength), parseResponseBody);
+                using Socket udpSocket = new(_serverEndPoint.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
+                udpSocket.Connect(_serverEndPoint);
+                await udpSocket.SendAsync(memory.Slice(0, questionSize), cancellationToken);
+                int readLength = await udpSocket.ReceiveAsync(memory, cancellationToken);
+
+                TResult? result = DoParseResponse(queryId, buffer.AsSpan(0, readLength), parseResponseBody);
 
                 if (result is null)
                 {
@@ -173,30 +192,29 @@ namespace Test.Net
                     await tcpSocket.ConnectAsync(_serverEndPoint);
 
                     // The TCP message is prefixed with the 2-byte length
-                    questionSize = EncodeQuestion(buffer.AsSpan(2), name, queryType);
+                    questionSize = EncodeQuestion(memory.Span[2..], name, queryType);
+                    queryId = MemoryMarshal.AsRef<Header>(memory.Span[2..]).TransactionId;
                     BinaryPrimitives.WriteUInt16BigEndian(buffer, (ushort)questionSize);
 
                     await tcpSocket.SendAsync(memory.Slice(0, questionSize + 2), cancellationToken);
 
                     readLength = await tcpSocket.ReceiveAsync(memory.Slice(0, 2), cancellationToken);
-                    Debug.Assert(readLength == 2); // TODO: implement robust reading
+                    Assert(readLength == 2); // TODO: implement robust reading
 
                     // The TCP message is prefixed with the 2-byte length
                     int responseSize = BinaryPrimitives.ReadUInt16BigEndian(buffer);
                     tcpBuffer = ArrayPool<byte>.Shared.Rent(responseSize);
                     memory = new Memory<byte>(tcpBuffer);
 
-                    readLength = await tcpSocket.ReceiveAsync(memory, cancellationToken);
-                    Debug.Assert(responseSize == readLength); // TODO: implement robust reading
-                    result = DoParseResponse(tcpBuffer.AsSpan(0, readLength), parseResponseBody);
-                    if (result is null)
+                    for (int offset = 0; offset < responseSize; offset += readLength)
                     {
-                        throw new Exception("Invalid response!");
+                        readLength = await tcpSocket.ReceiveAsync(memory.Slice(offset), cancellationToken);
                     }
-                    return result!;
+
+                    result = DoParseResponse(queryId, tcpBuffer.AsSpan(0, responseSize), parseResponseBody);
                 }
 
-                return result is null ? throw new NotImplementedException("Truncated!") : result;
+                return result is null ? throw new Exception("Invalid response: Truncated TCP!") : result;
             }
             finally
             {
@@ -209,10 +227,14 @@ namespace Test.Net
             }
 
 
-            static TResult? DoParseResponse(Span<byte> buffer, ParseResponseDataDelegate<TResult> parseResponseBody)
+            static TResult? DoParseResponse(ushort queryId, Span<byte> buffer, ParseResponseDataDelegate<TResult> parseResponseBody)
             {
                 ref Header header = ref MemoryMarshal.AsRef<Header>(buffer);
                 Log($"T:{header.TransactionId} questions {header.QueryCount} Answers {header.AnswerCount} length {buffer.Length}");
+                if (header.TransactionId != queryId)
+                {
+                    throw new Exception("Invalid response: TransactionId mismatch!");
+                }
 
                 return header.ResultTruncated ? default : parseResponseBody(buffer, ref header);
             }
@@ -245,15 +267,34 @@ namespace Test.Net
             }
         }
 
+        public ValueTask<TxtResult[]> ResolveTextAsync(string name, CancellationToken cancellationToken = default)
+        {
+            return SendQueryAsync(name, QueryType.Text, ParseResponse, cancellationToken);
+
+            static TxtResult[] ParseResponse(Span<byte> buffer, ref Header header)
+            {
+                int offset = SkipResponseQuestionSection(buffer, header.QueryCount);
+                var result = new TxtResult[header.AnswerCount];
+                int actualCount = ParseTxtRecords(buffer, ref offset, result);
+
+                if (actualCount != result.Length)
+                {
+                    throw new Exception($"Invalid response: expected {result.Length} TXT records, got {actualCount}.");
+                }
+
+                return result;
+            }
+        }
+
         public async ValueTask<ServiceResult[]> ResolveServiceAsync(string name, CancellationToken cancellationToken = default)
-            => (await ResolveServiceAsync(name, false, cancellationToken)).Item1;
+            => (await ResolveServiceAsync(name, false, cancellationToken)).Services;
 
         // https://www.rfc-editor.org/rfc/rfc2782.html: "Implementors are urged, but not required, to return the address record(s) in the Additional Data section."
         // If no matching addresses are found, an empty array is being returned.
         public async ValueTask<(ServiceResult[] Services, AddressResult[] Addresses)> ResolveServiceAndAddressesAsync(string name, CancellationToken cancellationToken = default)
         {
             var result = await ResolveServiceAsync(name, true, cancellationToken);
-            Debug.Assert(result.Addresses != null);
+            Assert(result.Addresses != null);
             return (result.Services, result.Addresses);
         }
 
@@ -422,10 +463,35 @@ namespace Test.Net
 
                 if (queryType is QueryType.Address or QueryType.IP6Address)
                 {
-                    Debug.Assert(queryType == QueryType.Address ? dataLength == 4 : dataLength == IPv6Length);
+                    Assert(queryType == QueryType.Address ? dataLength == 4 : dataLength == IPv6Length);
                     r.Address = new IPAddress(buffer.Slice(offset, dataLength));
                     r.Ttl = (int)ttl;
 
+                    index++;
+                }
+
+                offset += dataLength;
+                count--;
+            }
+
+            return index;
+        }
+
+        private static int ParseTxtRecords(Span<byte> buffer, ref int offset, TxtResult[] result)
+        {
+            int index = 0;
+            int count = result.Length;
+            while (count > 0)
+            {
+                (QueryType queryType, uint ttl, int dataLength) = ReadRecordHeader(buffer, ref offset);
+
+                ref TxtResult r = ref result[index];
+
+                if (queryType is QueryType.Text)
+                {
+                    r.Ttl = (int)ttl;
+                    r.Data = new byte[dataLength];
+                    buffer.Slice(offset, dataLength).CopyTo(r.Data);
                     index++;
                 }
 
@@ -450,14 +516,14 @@ namespace Test.Net
                     index++;
                     break;
                 }
-                else if ((buffer[index] & (byte)0xc0) == 0xc0)
+                else if ((buffer[index] & 0xc0) == 0xc0)
                 {
                     if (jumpOffset)
                     {
                         throw new Exception("ONLY ONE POINTER ALLOWED");
                     }
                     jumpOffset = true;
-                    index = (buffer[index] & (byte)0x3f) + buffer[index + 1];
+                    index = (buffer[index] & 0x3f) + buffer[index + 1];
                     continue;
                 }
                 else
@@ -498,11 +564,23 @@ namespace Test.Net
             return index - offset;
         }
 
-        public void Dispose() => _socket?.Dispose();
+        public void Dispose()
+        {
+        }
 
         private static void Log(FormattableString str)
         {
             Console.WriteLine(str);
+        }
+
+        private static void Assert(bool condition)
+        {
+            if (!condition)
+            {
+                throw new Exception("Assertion failed");
+            }
+
+            // Debug.Assert(condition);
         }
 
         private static ushort ReverseByteOrder(ushort value) => BitConverter.IsLittleEndian ? BinaryPrimitives.ReverseEndianness(value) : value;

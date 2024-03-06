@@ -10,6 +10,12 @@ srv.test:53 {
     log
 }
 
+txt.test:53 {
+    file /zones/txt.test
+    errors
+    log
+}
+
 trunc.test:53 {
     file /zones/trunc.test
     errors
@@ -24,9 +30,9 @@ drop.test:53 {
     log
 }
 
-.:53 {
-    forward . /etc/resolv.conf
-    whoami
-    errors
-    log
-}
+#.:53 {
+#    forward . /etc/resolv.conf
+#    whoami
+#    errors
+#    log
+#}

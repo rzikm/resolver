@@ -52,6 +52,34 @@ namespace Test.Net
             Assert.Equal(expected, result);
         }
 
+
+        [Fact]
+        public async Task ResolveIPAddressAsync_Parallel()
+        {
+            List<(Task<AddressResult[]> Task, IPAddress Expected)> workers = new();
+
+            for (int i = 0; i < 10; i++)
+            {
+                for (int j = 0; j < 10; j++)
+                {
+                    string hostName = $"a{j:D2}.address.test";
+                    IPAddress expected = IPAddress.Parse($"40.30.20.{j + 10}");
+                    Task<AddressResult[]> task = Task.Run(() => _resolver.ResolveIPAddressAsync(hostName, AddressFamily.InterNetwork).AsTask());
+                    workers.Add((task, expected));
+                }
+            }
+
+            await Task.WhenAll(workers.Select(w => w.Task));
+
+            AddressResult[][] results = workers.Select(w => w.Task.Result).ToArray();
+
+            foreach (var (task, expected) in workers)
+            {
+                AddressResult[] result = await task;
+                Assert.Equal(expected, result.Single().Address);
+            }
+        }
+
         //; _service._proto ttl IN SRV priority weight port target
         //_s0._tcp		0 IN SRV 0 0 1000 a0.srv.test.
         //_s1._udp		1 IN SRV 0 0 1001 a1.srv.test.
@@ -123,6 +151,47 @@ namespace Test.Net
                 ];
             AddressResult[] actual = await _resolver.ResolveIPAddressAsync("x.trunc.test", AddressFamily.InterNetworkV6);
             Assert.Equal(expected, actual);
+        }
+
+        public static TheoryData<string, (int Ttl, string[] Text)[]> ResolveTextAsync_Data = new()
+        {
+            { "t1.txt.test", [(1, ["test A"])] },
+            { "t2.txt.test", [(2, ["test B"]), (3, ["test C"])] },
+            { "multi1.txt.test", [(4, ["multi A", "multi B"])] },
+            { "multi2.txt.test", [(5, ["multi C", "multi D"]), (6, ["multi E", "multi F", "multi G"])] },
+        };  
+
+        [Theory]
+        [MemberData(nameof(ResolveTextAsync_Data))]
+        public async Task ResolveTextAsync(string name, (int Ttl, string[] Text)[] expected)
+        {
+            TxtResult[] result = await _resolver.ResolveTextAsync(name);
+            Assert.Equal(expected.Length, result.Length);
+
+            for (int i = 0; i < expected.Length; i++)
+            {
+                Assert.Equal(expected[i].Ttl, result[i].Ttl);
+                string[] actualText = result[i].GetText().ToArray();
+                Assert.Equal(expected[i].Text, actualText);
+            }
+        }
+
+        [Fact]
+        public async Task ResolveTextAsync_Large()
+        {
+            TxtResult[] result = await _resolver.ResolveTextAsync("large.txt.test");
+            Assert.Equal(220, result.Length);
+            foreach (TxtResult r in result)
+            {
+                Assert.Equal(256, r.Data.Length);
+            }
+        }
+
+        [Fact]
+        public async Task ResolveTextAsync_TcpTruncated()
+        {
+            Exception ex = await Assert.ThrowsAsync<Exception>(async () => { await _resolver.ResolveTextAsync("trunc-tcp.txt.test"); });
+            _output.WriteLine(ex.Message);
         }
 
         public void Dispose() => _resolver.Dispose();
