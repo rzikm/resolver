@@ -1,17 +1,10 @@
-
-using System;
 using System.Buffers;
 using System.Buffers.Binary;
-using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Linq;
 using System.Net;
 using System.Net.Sockets;
-using System.Reflection.PortableExecutable;
 using System.Runtime.InteropServices;
 using System.Text;
-using System.Threading;
-using System.Xml.Linq;
 
 namespace Test.Net
 {
@@ -70,6 +63,8 @@ namespace Test.Net
         private const int HeaderSize = 12;
         private const int RecordHeaderLength = 10;
         private const byte DotValue = 46;
+
+        private static readonly TimeSpan s_maxTimeout = TimeSpan.FromMilliseconds(int.MaxValue);
 
         // RFC 1035 4.1.1. Header section format
         private struct Header
@@ -145,8 +140,11 @@ namespace Test.Net
             }
         }
 
+        bool _disposed = false;
         private IPEndPoint _serverEndPoint;
         private ResolverOptions _options;
+        private TimeSpan _timeout;
+        private CancellationTokenSource _pendingRequestsCts = new();
 
         public Resolver() : this(OperatingSystem.IsWindows() ? NetworkInfo.GetOptions() : ResolvConf.GetOptions())
         {
@@ -166,9 +164,51 @@ namespace Test.Net
         {
         }
 
-        private delegate TResult ParseResponseDataDelegate<TResult>(Span<byte> buffer, ref Header header);
+        public TimeSpan Timeout
+        {
+            get => _timeout;
+            set
+            {
+                ObjectDisposedException.ThrowIf(_disposed, this);
 
+                if (value != System.Threading.Timeout.InfiniteTimeSpan)
+                {
+                    ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(value, TimeSpan.Zero);
+                    ArgumentOutOfRangeException.ThrowIfGreaterThan(value, s_maxTimeout);
+                }
+                _timeout = value;
+            }
+        }
+
+        private delegate TResult ParseResponseDataDelegate<TResult>(Span<byte> buffer, ref Header header);
         private async ValueTask<TResult> SendQueryAsync<TResult>(string name, QueryType queryType, ParseResponseDataDelegate<TResult> parseResponseBody, CancellationToken cancellationToken)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+
+            (CancellationTokenSource cts, bool disposeTokenSource, CancellationTokenSource pendingRequestsCts) = PrepareCancellationTokenSource(cancellationToken);
+
+            try
+            {
+                return await SendQueryAsyncCore(name, queryType, parseResponseBody, cts.Token);
+            }
+            catch (OperationCanceledException oce) when (
+                !cancellationToken.IsCancellationRequested && // not cancelled by the caller
+                !pendingRequestsCts.IsCancellationRequested) // not cancelled by the global token (dispose)
+                                                             // the only remaining token that could cancel this is the linked cts from the timeout.
+            {
+                Debug.Assert(cts.Token.IsCancellationRequested);
+                throw new TimeoutException("The operation has timed out.", oce);
+            }
+            finally
+            {
+                if (disposeTokenSource)
+                {
+                    cts.Dispose();
+                }
+            }
+        }
+
+        private async ValueTask<TResult> SendQueryAsyncCore<TResult>(string name, QueryType queryType, ParseResponseDataDelegate<TResult> parseResponseBody, CancellationToken cancellationToken)
         {
             byte[] buffer = ArrayPool<byte>.Shared.Rent(512);
             byte[]? tcpBuffer = null;
@@ -250,7 +290,7 @@ namespace Test.Net
             // TODO name checks.
             QueryType queryType = addressFamily == AddressFamily.InterNetwork ? QueryType.Address : QueryType.IP6Address;
 
-            return SendQueryAsync(name, queryType, ParseResponse, cancellationToken); 
+            return SendQueryAsync(name, queryType, ParseResponse, cancellationToken);
 
             static AddressResult[] ParseResponse(Span<byte> buffer, ref Header header)
             {
@@ -295,7 +335,7 @@ namespace Test.Net
         {
             var result = await ResolveServiceAsync(name, true, cancellationToken);
             Assert(result.Addresses != null);
-            return (result.Services, result.Addresses);
+            return (result.Services, result.Addresses!);
         }
 
         private ValueTask<(ServiceResult[] Services, AddressResult[]? Addresses)> ResolveServiceAsync(string name, bool includeAddresses, CancellationToken cancellationToken)
@@ -323,7 +363,7 @@ namespace Test.Net
 
                     AddressResult[] addresses = new AddressResult[header.AdditionalRecordCount];
                     actualCount = ParseAddressRecords(buffer, ref offset, addresses);
-                    
+
                     // If there were non A/AAAA records in the additional section, shrink the array.
                     if (actualCount < addresses.Length)
                     {
@@ -401,12 +441,12 @@ namespace Test.Net
             uint ttl = BinaryPrimitives.ReadUInt32BigEndian(buffer.Slice(offset + 4, 4));
             int dataLength = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(offset + 8, 2));
             offset += RecordHeaderLength;
-            
+
             Log($"Type {queryType} ttl = {ttl} data {dataLength}");
 
             return (queryType, ttl, dataLength);
         }
-        
+
         private static int ParseServiceRecords(Span<byte> buffer, ref int offset, Span<ServiceResult> result)
         {
             int index = 0;
@@ -566,11 +606,21 @@ namespace Test.Net
 
         public void Dispose()
         {
+            if (!_disposed)
+            {
+                _disposed = true;
+
+                // Cancel all pending requests (if any). Note that we don't call CancelPendingRequests() but cancel
+                // the CTS directly. The reason is that CancelPendingRequests() would cancel the current CTS and create
+                // a new CTS. We don't want a new CTS in this case.
+                _pendingRequestsCts.Cancel();
+                _pendingRequestsCts.Dispose();
+            }
         }
 
         private static void Log(FormattableString str)
         {
-            Console.WriteLine(str);
+            // Console.WriteLine(str);
         }
 
         private static void Assert(bool condition)
@@ -584,5 +634,45 @@ namespace Test.Net
         }
 
         private static ushort ReverseByteOrder(ushort value) => BitConverter.IsLittleEndian ? BinaryPrimitives.ReverseEndianness(value) : value;
+
+        private (CancellationTokenSource TokenSource, bool DisposeTokenSource, CancellationTokenSource PendingRequestsCts) PrepareCancellationTokenSource(CancellationToken cancellationToken)
+        {
+            // We need a CancellationTokenSource to use with the request.  We always have the global
+            // _pendingRequestsCts to use, plus we may have a token provided by the caller, and we may
+            // have a timeout.  If we have a timeout or a caller-provided token, we need to create a new
+            // CTS (we can't, for example, timeout the pending requests CTS, as that could cancel other
+            // unrelated operations).  Otherwise, we can use the pending requests CTS directly.
+
+            // Snapshot the current pending requests cancellation source. It can change concurrently due to cancellation being requested
+            // and it being replaced, and we need a stable view of it: if cancellation occurs and the caller's token hasn't been canceled,
+            // it's either due to this source or due to the timeout, and checking whether this source is the culprit is reliable whereas
+            // it's more approximate checking elapsed time.
+            CancellationTokenSource pendingRequestsCts = _pendingRequestsCts;
+
+            bool hasTimeout = _timeout != System.Threading.Timeout.InfiniteTimeSpan;
+            if (hasTimeout || cancellationToken.CanBeCanceled)
+            {
+                CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, pendingRequestsCts.Token);
+                if (hasTimeout)
+                {
+                    cts.CancelAfter(_timeout);
+                }
+
+                return (cts, DisposeTokenSource: true, pendingRequestsCts);
+            }
+
+            return (pendingRequestsCts, DisposeTokenSource: false, pendingRequestsCts);
+        }
+
+        private void CancelPendingRequests()
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+
+            // With every request we link this cancellation token source.
+            CancellationTokenSource currentCts = Interlocked.Exchange(ref _pendingRequestsCts, new CancellationTokenSource());
+
+            currentCts.Cancel();
+            currentCts.Dispose();
+        }
     }
 }
