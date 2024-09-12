@@ -17,7 +17,7 @@ namespace Test.Net
         RecursionDesired = 0x0100,
         ResultTruncated = 0x0200,
         HasAuthorityAnswer = 0x0400,
-        HasQuery = 0x8000,
+        HasResponse = 0x8000,
     }
 
     internal enum QueryType
@@ -131,6 +131,8 @@ namespace Test.Net
 
             internal bool ResultTruncated => (QueryFlags & QueryFlags.ResultTruncated) != 0;
 
+            internal bool IsResponse => (QueryFlags & QueryFlags.HasResponse) != 0;
+
             internal void InitQueryHeader()
             {
                 this = default;
@@ -208,6 +210,34 @@ namespace Test.Net
             }
         }
 
+        private async ValueTask<int> ReceiveResponseAsync(ushort queryId, Socket socket, Memory<byte> memory, CancellationToken cancellationToken)
+        {
+            do
+            {
+                int readLength = await socket.ReceiveAsync(memory, SocketFlags.None, cancellationToken);
+
+                if (readLength < HeaderSize)
+                {
+                    continue;
+                }
+
+                Header header = MemoryMarshal.AsRef<Header>(memory.Span);
+                if (header.TransactionId != queryId)
+                {
+                    // possibly a response to a previous query which timed out and the socket was reused.
+                    continue;
+                }
+
+                if (!header.IsResponse)
+                {
+                    // this is a query, not a response.
+                    continue;
+                }
+
+                return readLength;
+            } while (true);
+        }
+
         private async ValueTask<TResult> SendQueryAsyncCore<TResult>(string name, QueryType queryType, ParseResponseDataDelegate<TResult> parseResponseBody, CancellationToken cancellationToken)
         {
             byte[] buffer = ArrayPool<byte>.Shared.Rent(512);
@@ -220,11 +250,12 @@ namespace Test.Net
                 ushort queryId = MemoryMarshal.AsRef<Header>(memory.Span).TransactionId;
 
                 using Socket udpSocket = new(_serverEndPoint.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
-                udpSocket.Connect(_serverEndPoint);
+                await udpSocket.ConnectAsync(_serverEndPoint);
                 await udpSocket.SendAsync(memory.Slice(0, questionSize), cancellationToken);
-                int readLength = await udpSocket.ReceiveAsync(memory, cancellationToken);
 
-                TResult? result = DoParseResponse(queryId, buffer.AsSpan(0, readLength), parseResponseBody);
+                int readLength = await ReceiveResponseAsync(queryId, udpSocket, memory, cancellationToken);
+
+                TResult? result = DoParseResponse(name, queryId, buffer.AsSpan(0, readLength), parseResponseBody);
 
                 if (result is null)
                 {
@@ -251,7 +282,7 @@ namespace Test.Net
                         readLength = await tcpSocket.ReceiveAsync(memory.Slice(offset), cancellationToken);
                     }
 
-                    result = DoParseResponse(queryId, tcpBuffer.AsSpan(0, responseSize), parseResponseBody);
+                    result = DoParseResponse(name, queryId, tcpBuffer.AsSpan(0, responseSize), parseResponseBody);
                 }
 
                 return result is null ? throw new Exception("Invalid response: Truncated TCP!") : result;
@@ -266,13 +297,14 @@ namespace Test.Net
                 }
             }
 
-
-            static TResult? DoParseResponse(ushort queryId, Span<byte> buffer, ParseResponseDataDelegate<TResult> parseResponseBody)
+            static TResult? DoParseResponse(string name, ushort queryId, Span<byte> buffer, ParseResponseDataDelegate<TResult> parseResponseBody)
             {
                 ref Header header = ref MemoryMarshal.AsRef<Header>(buffer);
                 Log($"T:{header.TransactionId} questions {header.QueryCount} Answers {header.AnswerCount} length {buffer.Length}");
                 if (header.TransactionId != queryId)
                 {
+                    var responseFor = DecodeName(buffer, HeaderSize);
+                    Console.WriteLine($"[{name}] T:{header.TransactionId} mismatch; questions {header.QueryCount} ({responseFor}) Answers {header.AnswerCount} length {buffer.Length}");
                     throw new Exception("Invalid response: TransactionId mismatch!");
                 }
 
@@ -300,7 +332,8 @@ namespace Test.Net
 
                 if (actualCount != result.Length)
                 {
-                    throw new Exception($"Invalid response: expected {result.Length} Address records, got {actualCount}.");
+                    // throw new Exception($"Invalid response: expected {result.Length} Address records, got {actualCount}.");
+                    return result.AsSpan(0, actualCount).ToArray();
                 }
 
                 return result;
