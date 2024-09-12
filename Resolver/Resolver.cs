@@ -8,34 +8,6 @@ using System.Text;
 
 namespace Test.Net
 {
-    [Flags]
-    internal enum QueryFlags : ushort
-    {
-        IsCheckingDisabled = 0x0010,
-        IsAuthenticData = 0x0020,
-        RecursionAvailable = 0x0080,
-        RecursionDesired = 0x0100,
-        ResultTruncated = 0x0200,
-        HasAuthorityAnswer = 0x0400,
-        HasResponse = 0x8000,
-    }
-
-    internal enum QueryType
-    {
-        Address = 1,
-        NameServer = 2,
-        MailExchange = 15,
-        Text = 16,
-        IP6Address = 28,
-        Service = 33,
-        All = 255
-    }
-
-    internal enum QueryClass
-    {
-        Internet = 1
-    }
-
     public record struct AddressResult(int Ttl, IPAddress Address);
 
     public record struct ServiceResult(int Ttl, int Priority, int Weight, int Port, string Target);
@@ -65,82 +37,6 @@ namespace Test.Net
         private const byte DotValue = 46;
 
         private static readonly TimeSpan s_maxTimeout = TimeSpan.FromMilliseconds(int.MaxValue);
-
-        // RFC 1035 4.1.1. Header section format
-        private struct Header
-        {
-            private ushort _transactionId;
-            private ushort _flags;
-
-            private ushort _queryCount;
-            private ushort _answerCount;
-            private ushort _authorityCount;
-            private ushort _additionalRecordCount;
-
-            internal ushort QueryCount
-            {
-                get => ReverseByteOrder(_queryCount);
-                set => _queryCount = ReverseByteOrder(value);
-            }
-
-            internal ushort AnswerCount
-            {
-                get => ReverseByteOrder(_answerCount);
-                set => _answerCount = ReverseByteOrder(value);
-            }
-
-            internal ushort AuthorityCount
-            {
-                get => ReverseByteOrder(_authorityCount);
-                set => _authorityCount = ReverseByteOrder(value);
-            }
-
-            internal ushort AdditionalRecordCount
-            {
-                get => ReverseByteOrder(_additionalRecordCount);
-                set => _additionalRecordCount = ReverseByteOrder(value);
-            }
-
-            internal ushort TransactionId
-            {
-                get => ReverseByteOrder(_transactionId);
-                set => _transactionId = ReverseByteOrder(value);
-            }
-
-            internal QueryFlags QueryFlags
-            {
-                get => (QueryFlags)ReverseByteOrder(_flags);
-                set => _flags = ReverseByteOrder((ushort)value);
-            }
-
-            internal bool RecursionDesired
-            {
-                get => (QueryFlags & QueryFlags.RecursionDesired) != 0;
-                set
-                {
-                    if (value)
-                    {
-                        QueryFlags |= QueryFlags.RecursionDesired;
-                    }
-                    else
-                    {
-                        QueryFlags &= ~QueryFlags.RecursionDesired;
-                    }
-                }
-            }
-
-            internal bool ResultTruncated => (QueryFlags & QueryFlags.ResultTruncated) != 0;
-
-            internal bool IsResponse => (QueryFlags & QueryFlags.HasResponse) != 0;
-
-            internal void InitQueryHeader()
-            {
-                this = default;
-                TransactionId = (ushort)Random.Shared.Next(ushort.MaxValue);
-                RecursionDesired = true;
-                QueryCount = 1;
-            }
-        }
 
         bool _disposed = false;
         private IPEndPoint _serverEndPoint;
@@ -665,8 +561,6 @@ namespace Test.Net
 
             // Debug.Assert(condition);
         }
-
-        private static ushort ReverseByteOrder(ushort value) => BitConverter.IsLittleEndian ? BinaryPrimitives.ReverseEndianness(value) : value;
 
         private (CancellationTokenSource TokenSource, bool DisposeTokenSource, CancellationTokenSource PendingRequestsCts) PrepareCancellationTokenSource(CancellationToken cancellationToken)
         {
