@@ -4,7 +4,7 @@
 		<TargetFramework>net8.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<RootNamespace>Test.Net</RootNamespace>
+		<RootNamespace>Resolver.Tests</RootNamespace>
 	</PropertyGroup>
 
 	<ItemGroup>

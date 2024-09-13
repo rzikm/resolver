@@ -1,22 +1,21 @@
 ﻿using System.Net;
 
-namespace Test.Net
+namespace Resolver;
+
+public class ResolverOptions
 {
-    public class ResolverOptions
+    public IPEndPoint[] Servers;
+    public string DefaultDomain = string.Empty;
+    public string[]? SearchDomains;
+    public bool UseHostsFile;
+
+    public ResolverOptions(IPEndPoint[] servers)
     {
-        public IPEndPoint[] Servers;
-        public string DefaultDomain = string.Empty;
-        public string[]? SearchDomains;
-        public bool UseHostsFile;
+        Servers = servers;
+    }
 
-        public ResolverOptions(IPEndPoint[] servers)
-        {
-            Servers = servers;
-        }
-
-        public ResolverOptions(IPEndPoint server)
-        {
-            Servers = new IPEndPoint[]{ server };
-        }
+    public ResolverOptions(IPEndPoint server)
+    {
+        Servers = new IPEndPoint[] { server };
     }
 }

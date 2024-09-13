@@ -1,6 +1,6 @@
 ﻿using System.Net.Sockets;
 using System.Collections.Concurrent;
-using Test.Net;
+using Resolver;
 using System.Threading;
 using System.Net;
 using System.Threading.Channels;

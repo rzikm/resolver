@@ -1,13 +1,12 @@
-namespace Test.Net
+namespace Resolver;
+
+internal enum QueryType
 {
-    internal enum QueryType
-    {
-        Address = 1,
-        NameServer = 2,
-        MailExchange = 15,
-        Text = 16,
-        IP6Address = 28,
-        Service = 33,
-        All = 255
-    }
+    Address = 1,
+    NameServer = 2,
+    MailExchange = 15,
+    Text = 16,
+    IP6Address = 28,
+    Service = 33,
+    All = 255
 }

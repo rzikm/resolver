@@ -1,7 +1,6 @@
-namespace Test.Net
+namespace Resolver;
+
+internal enum QueryClass
 {
-    internal enum QueryClass
-    {
-        Internet = 1
-    }
+    Internet = 1
 }
