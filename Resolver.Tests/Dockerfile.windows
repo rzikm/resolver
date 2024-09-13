@@ -1,6 +1,0 @@
-FROM golang
-RUN go install github.com/coredns/coredns@latest
-COPY ./zones /zones
-EXPOSE 53 53/udp
-CMD ["-conf", "/zones/Corefile"]
-ENTRYPOINT ["coredns.exe"]
