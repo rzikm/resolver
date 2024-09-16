@@ -5,7 +5,7 @@ namespace Resolver;
 // RFC 1035 4.1.1. Header section format
 internal struct DnsMessageHeader
 {
-    internal static const HeaderLength = 12;
+    internal const int HeaderLength = 12;
 
     private ushort _transactionId;
     private ushort _flags;
