@@ -56,6 +56,20 @@ internal static class DnsPrimitives
 
     private static bool TryReadQNameCore(StringBuilder sb, ReadOnlySpan<byte> messageBuffer, int offset, out int bytesRead)
     {
+        //
+        // domain name can be either
+        // - a sequence of labels, where each label consists of a length octet
+        //   followed by that number of octets, terminated by a zero length octet
+        //   (root label)
+        // - a pointer, where the first two bits are set to 1, and the remaining
+        //   14 bits are an offset (from the start of the message) to the true
+        //   label
+        //
+        // It is not specified by the RFC if pointers must be backwards only,
+        // the code below prohibits forward (and self) pointers to avoid
+        // infinite loops
+        //
+
         bytesRead = 1;
 
         if (offset < 0 || offset >= messageBuffer.Length)
@@ -72,15 +86,16 @@ internal static class DnsPrimitives
             if ((length & 0xC0) == 0x00)
             {
                 // length followed by the label
-
                 if (length == 0)
                 {
                     // end of name
                     bytesRead = currentOffset - offset + 1;
                     return true;
                 }
+
                 if (currentOffset + 1 + length < messageBuffer.Length)
                 {
+                    // read next label/segment
                     if (sb.Length > 0)
                     {
                         sb.Append('.');
@@ -102,8 +117,12 @@ internal static class DnsPrimitives
                 {
                     int pointer = ((length & 0x3F) << 8) | messageBuffer[currentOffset + 1];
 
-                    // we prohibit self-references and forward pointers to avoid infinite loops, we do this
-                    // by truncating the messagebuffer at the offset where we started reading the name
+                    // we prohibit self-references and forward pointers to avoid
+                    // infinite loops, we do this by truncating the
+                    // messageBuffer at the offset where we started reading the
+                    // name. We also ignore the bytesRead from the recursive
+                    // call, as we are only interested on how many bytes we read
+                    // from the initial start of the name.
                     return TryReadQNameCore(sb, messageBuffer.Slice(0, offset), pointer, out int _);
                 }
                 else

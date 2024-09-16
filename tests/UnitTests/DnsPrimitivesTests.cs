@@ -86,7 +86,7 @@ public class DnsPrimitivesTests
 
         for (int i = 0; i < data.Length; i++)
         {
-            Assert.False(DnsPrimitives.TryReadQName(data.Slice(0, i), 0, out _, out _));
+            Assert.False(DnsPrimitives.TryReadQName(data.Slice(0, i), data.Length - 6, out _, out _));
         }
     }
 
@@ -106,6 +106,16 @@ public class DnsPrimitivesTests
         // www->[ptr to www->...]
         Span<byte> data = "\x0003www\x00c0"u8.ToArray();
         data[4] = 0xc0;
+
+        Assert.False(DnsPrimitives.TryReadQName(data, 0, out _, out _));
+    }
+
+    [Fact]
+    public void TryReadQName_ReservedBits()
+    {
+        Span<byte> data = "\x0003www\x00c0"u8.ToArray();
+        data[4] = 0xc0;
+        data[0] = 0x40;
 
         Assert.False(DnsPrimitives.TryReadQName(data, 0, out _, out _));
     }
