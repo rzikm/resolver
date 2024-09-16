@@ -69,7 +69,21 @@ internal struct DnsMessageHeader
 
     internal bool ResultTruncated => (QueryFlags & QueryFlags.ResultTruncated) != 0;
 
-    internal bool IsResponse => (QueryFlags & QueryFlags.HasResponse) != 0;
+    internal bool IsResponse
+    {
+        get => (QueryFlags & QueryFlags.HasResponse) != 0;
+        set
+        {
+            if (value)
+            {
+                QueryFlags |= QueryFlags.HasResponse;
+            }
+            else
+            {
+                QueryFlags &= ~QueryFlags.HasResponse;
+            }
+        }
+    }
 
     internal void InitQueryHeader()
     {

@@ -21,7 +21,7 @@ public class Resolver : IDisposable
     bool _disposed = false;
     private IPEndPoint _serverEndPoint;
     private ResolverOptions _options;
-    private TimeSpan _timeout;
+    private TimeSpan _timeout = System.Threading.Timeout.InfiniteTimeSpan;
     private CancellationTokenSource _pendingRequestsCts = new();
 
     public Resolver() : this(OperatingSystem.IsWindows() ? NetworkInfo.GetOptions() : ResolvConf.GetOptions())

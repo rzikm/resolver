@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.InteropServices;
 
 namespace Resolver;
@@ -22,7 +23,24 @@ internal struct DnsDataReader
             return false;
         }
 
+        _position += DnsMessageHeader.HeaderLength;
         header = MemoryMarshal.AsRef<DnsMessageHeader>(_buffer.Span);
+        return true;
+    }
+
+    internal bool TryReadQuestion([NotNullWhen(true)] out string? name, out QueryType type, out QueryClass @class)
+    {
+        if (!TryReadDomainName(out name) ||
+            !TryReadUInt16(out ushort typeAsInt) ||
+            !TryReadUInt16(out ushort classAsInt))
+        {
+            type = 0;
+            @class = 0;
+            return false;
+        }
+
+        type = (QueryType)typeAsInt;
+        @class = (QueryClass)classAsInt;
         return true;
     }
 
@@ -69,11 +87,11 @@ internal struct DnsDataReader
         ReadOnlyMemory<byte> data = _buffer.Slice(_position, dataLength);
         _position += dataLength;
 
-        record = new DnsResourceRecord(name!, (QueryType)type, (QueryClass)@class, (int)ttl, data);
+        record = new DnsResourceRecord(name, (QueryType)type, (QueryClass)@class, (int)ttl, data);
         return true;
     }
 
-    public bool TryReadDomainName(out string? name)
+    public bool TryReadDomainName([NotNullWhen(true)] out string? name)
     {
         if (DnsPrimitives.TryReadQName(_buffer.Span, _position, out name, out int bytesRead))
         {
