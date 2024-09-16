@@ -15,7 +15,6 @@ public class Resolver : IDisposable
     private const int IPv6Length = 16;
     private const int HeaderSize = 12;
     private const int RecordHeaderLength = 10;
-    private const byte DotValue = 46;
 
     private static readonly TimeSpan s_maxTimeout = TimeSpan.FromMilliseconds(int.MaxValue);
 
@@ -59,7 +58,7 @@ public class Resolver : IDisposable
         }
     }
 
-    private delegate TResult ParseResponseDataDelegate<TResult>(Span<byte> buffer, ref Header header);
+    private delegate TResult ParseResponseDataDelegate<TResult>(Span<byte> buffer, ref DnsMessageHeader header);
     private async ValueTask<TResult> SendQueryAsync<TResult>(string name, QueryType queryType, ParseResponseDataDelegate<TResult> parseResponseBody, CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -98,7 +97,7 @@ public class Resolver : IDisposable
                 continue;
             }
 
-            Header header = MemoryMarshal.AsRef<Header>(memory.Span);
+            DnsMessageHeader header = MemoryMarshal.AsRef<DnsMessageHeader>(memory.Span);
             if (header.TransactionId != queryId)
             {
                 // possibly a response to a previous query which timed out and the socket was reused.
@@ -123,8 +122,8 @@ public class Resolver : IDisposable
         {
             // TODO: Implement UDP retries.
             Memory<byte> memory = new Memory<byte>(buffer);
-            int questionSize = EncodeQuestion(buffer, name, queryType);
-            ushort queryId = MemoryMarshal.AsRef<Header>(memory.Span).TransactionId;
+            int questionSize = EncodeQuestion(memory, name, queryType);
+            ushort queryId = MemoryMarshal.AsRef<DnsMessageHeader>(memory.Span).TransactionId;
 
             using Socket udpSocket = new(_serverEndPoint.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
             await udpSocket.ConnectAsync(_serverEndPoint);
@@ -140,8 +139,8 @@ public class Resolver : IDisposable
                 await tcpSocket.ConnectAsync(_serverEndPoint);
 
                 // The TCP message is prefixed with the 2-byte length
-                questionSize = EncodeQuestion(memory.Span[2..], name, queryType);
-                queryId = MemoryMarshal.AsRef<Header>(memory.Span[2..]).TransactionId;
+                questionSize = EncodeQuestion(memory.Slice(2), name, queryType);
+                queryId = MemoryMarshal.AsRef<DnsMessageHeader>(memory.Slice(2).Span).TransactionId;
                 BinaryPrimitives.WriteUInt16BigEndian(buffer, (ushort)questionSize);
 
                 await tcpSocket.SendAsync(memory.Slice(0, questionSize + 2), cancellationToken);
@@ -176,7 +175,7 @@ public class Resolver : IDisposable
 
         static TResult? DoParseResponse(string name, ushort queryId, Span<byte> buffer, ParseResponseDataDelegate<TResult> parseResponseBody)
         {
-            ref Header header = ref MemoryMarshal.AsRef<Header>(buffer);
+            ref DnsMessageHeader header = ref MemoryMarshal.AsRef<DnsMessageHeader>(buffer);
             Log($"T:{header.TransactionId} questions {header.QueryCount} Answers {header.AnswerCount} length {buffer.Length}");
             if (header.TransactionId != queryId)
             {
@@ -201,7 +200,7 @@ public class Resolver : IDisposable
 
         return SendQueryAsync(name, queryType, ParseResponse, cancellationToken);
 
-        static AddressResult[] ParseResponse(Span<byte> buffer, ref Header header)
+        static AddressResult[] ParseResponse(Span<byte> buffer, ref DnsMessageHeader header)
         {
             int offset = SkipResponseQuestionSection(buffer, header.QueryCount);
             var result = new AddressResult[header.AnswerCount];
@@ -221,7 +220,7 @@ public class Resolver : IDisposable
     {
         return SendQueryAsync(name, QueryType.Text, ParseResponse, cancellationToken);
 
-        static TxtResult[] ParseResponse(Span<byte> buffer, ref Header header)
+        static TxtResult[] ParseResponse(Span<byte> buffer, ref DnsMessageHeader header)
         {
             int offset = SkipResponseQuestionSection(buffer, header.QueryCount);
             var result = new TxtResult[header.AnswerCount];
@@ -252,7 +251,7 @@ public class Resolver : IDisposable
     {
         return SendQueryAsync(name, QueryType.Service, ParseResponse, cancellationToken);
 
-        (ServiceResult[], AddressResult[]?) ParseResponse(Span<byte> buffer, ref Header header)
+        (ServiceResult[], AddressResult[]?) ParseResponse(Span<byte> buffer, ref DnsMessageHeader header)
         {
             int offset = SkipResponseQuestionSection(buffer, header.QueryCount);
             var result = new ServiceResult[header.AnswerCount];
@@ -289,37 +288,17 @@ public class Resolver : IDisposable
         }
     }
 
-    private static int EncodeName(Span<byte> buffer, string name)
+    private static int EncodeQuestion(Memory<byte> buffer, string name, QueryType queryType)
     {
-        int length = Encoding.ASCII.GetBytes(name, buffer.Slice(1));
-        buffer[length + 1] = 0; // last label
-        Span<byte> nameBuffer = buffer.Slice(0, length + 1);
-        while (true)
+        DnsMessageHeader header = default;
+        header.InitQueryHeader();
+        DnsDataWriter writer = new DnsDataWriter(buffer);
+        if (!writer.TryWriteHeader(header) ||
+            !writer.TryWriteQuestion(name, queryType, QueryClass.Internet))
         {
-            int index = nameBuffer.Slice(1).IndexOf<byte>(DotValue);
-            if (index == -1)
-            {
-                nameBuffer[0] = (byte)(nameBuffer.Length - 1);
-                // this is last label
-                break;
-            }
-            else
-            {
-                nameBuffer[0] = (byte)index;
-                nameBuffer = nameBuffer.Slice(index + 1);
-            }
+            throw new Exception("Buffer too small");
         }
-
-        return length + 2;
-    }
-    private static int EncodeQuestion(Span<byte> buffer, string name, QueryType queryType)
-    {
-        MemoryMarshal.AsRef<Header>(buffer).InitQueryHeader();
-        buffer = buffer.Slice(HeaderSize);
-        int size = EncodeName(buffer, name);
-        BinaryPrimitives.WriteInt16BigEndian(buffer.Slice(size), (short)queryType);
-        BinaryPrimitives.WriteInt16BigEndian(buffer.Slice(size + 2), (short)QueryClass.Internet);
-        return size + 4 + HeaderSize;
+        return writer.Position;
     }
 
     private static int SkipResponseQuestionSection(Span<byte> buffer, int count)
@@ -413,7 +392,7 @@ public class Resolver : IDisposable
 
             if (queryType is QueryType.Address or QueryType.IP6Address)
             {
-                Assert(queryType == QueryType.Address ? dataLength == 4 : dataLength == IPv6Length);
+                Assert(queryType == QueryType.Address ? dataLength == IPv4Length : dataLength == IPv6Length);
                 r.Address = new IPAddress(buffer.Slice(offset, dataLength));
                 r.Ttl = (int)ttl;
 
@@ -450,44 +429,6 @@ public class Resolver : IDisposable
         }
 
         return index;
-    }
-
-    private static string DecodeName(Span<byte> buffer, int offset)
-    {
-        Span<byte> name = stackalloc byte[MaximumNameLength + 1];
-        int length = 0;
-        bool jumpOffset = false;
-
-        int index = offset;
-        while (true)
-        {
-            if (buffer[index] == 0)
-            {
-                index++;
-                break;
-            }
-            else if ((buffer[index] & 0xc0) == 0xc0)
-            {
-                if (jumpOffset)
-                {
-                    throw new Exception("ONLY ONE POINTER ALLOWED");
-                }
-                jumpOffset = true;
-                index = (buffer[index] & 0x3f) + buffer[index + 1];
-                continue;
-            }
-            else
-            {
-                var label = buffer.Slice(index + 1, buffer[index]);
-                label.CopyTo(name.Slice(length));
-                length += buffer[index];
-                name[length] = DotValue;
-                length++;
-                index += buffer[index] + 1;
-            }
-        }
-
-        return length > 0 ? Encoding.ASCII.GetString(name.Slice(0, length - 1)) : string.Empty;
     }
 
     private static int SkipName(Span<byte> buffer, int offset)

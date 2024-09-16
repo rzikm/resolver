@@ -1,5 +1,3 @@
-using System.Security.Cryptography;
-
 namespace UnitTests;
 
 public class DnsDataReaderTests

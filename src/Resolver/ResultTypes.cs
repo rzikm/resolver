@@ -1,3 +1,6 @@
+using System.Net;
+using System.Text;
+
 namespace Resolver;
 
 public record struct AddressResult(int Ttl, IPAddress Address);
