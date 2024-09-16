@@ -131,7 +131,7 @@ public class Resolver : IDisposable
 
             int readLength = await ReceiveResponseAsync(queryId, udpSocket, memory, cancellationToken);
 
-            TResult? result = DoParseResponse(name, queryId, buffer.AsSpan(0, readLength), parseResponseBody);
+            TResult? result = DoParseResponse(name, queryId, buffer.AsMemory(0, readLength), parseResponseBody);
 
             if (result is null)
             {
@@ -158,7 +158,7 @@ public class Resolver : IDisposable
                     readLength = await tcpSocket.ReceiveAsync(memory.Slice(offset), cancellationToken);
                 }
 
-                result = DoParseResponse(name, queryId, tcpBuffer.AsSpan(0, responseSize), parseResponseBody);
+                result = DoParseResponse(name, queryId, tcpBuffer.AsMemory(0, responseSize), parseResponseBody);
             }
 
             return result is null ? throw new Exception("Invalid response: Truncated TCP!") : result;
@@ -173,18 +173,27 @@ public class Resolver : IDisposable
             }
         }
 
-        static TResult? DoParseResponse(string name, ushort queryId, Span<byte> buffer, ParseResponseDataDelegate<TResult> parseResponseBody)
+        static TResult? DoParseResponse(string name, ushort queryId, Memory<byte> buffer, ParseResponseDataDelegate<TResult> parseResponseBody)
         {
-            ref DnsMessageHeader header = ref MemoryMarshal.AsRef<DnsMessageHeader>(buffer);
+            DnsDataReader reader = new DnsDataReader(buffer);
+            if (!reader.TryReadHeader(out DnsMessageHeader header))
+            {
+                return default;
+            }
+
             Log($"T:{header.TransactionId} questions {header.QueryCount} Answers {header.AnswerCount} length {buffer.Length}");
             if (header.TransactionId != queryId)
             {
-                var responseFor = DecodeName(buffer, HeaderSize);
+                if (!DnsPrimitives.TryReadQName(buffer.Span, HeaderSize, out string? responseFor, out _))
+                {
+                    return default;
+                }
+
                 Console.WriteLine($"[{name}] T:{header.TransactionId} mismatch; questions {header.QueryCount} ({responseFor}) Answers {header.AnswerCount} length {buffer.Length}");
                 throw new Exception("Invalid response: TransactionId mismatch!");
             }
 
-            return header.ResultTruncated ? default : parseResponseBody(buffer, ref header);
+            return header.ResultTruncated ? default : parseResponseBody(buffer.Span, ref header);
         }
     }
 
@@ -352,7 +361,14 @@ public class Resolver : IDisposable
                 r.Weight = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(offset + 2, 2));
                 r.Port = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(offset + 4, 2));
                 r.Ttl = (int)ttl;
-                r.Target = DecodeName(buffer, offset + 6);
+
+                if (!DnsPrimitives.TryReadQName(buffer, offset + 6, out string? responseFor, out _))
+                {
+                    responseFor = null;
+                }
+
+                // TODO: validation
+                r.Target = responseFor!;
 
                 index++;
             }

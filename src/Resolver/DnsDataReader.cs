@@ -69,7 +69,7 @@ internal struct DnsDataReader
         ReadOnlyMemory<byte> data = _buffer.Slice(_position, dataLength);
         _position += dataLength;
 
-        record = new DnsResourceRecord(name!, (QueryType)type, (QueryClass)@class, ttl, data);
+        record = new DnsResourceRecord(name!, (QueryType)type, (QueryClass)@class, (int)ttl, data);
         return true;
     }
 
