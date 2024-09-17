@@ -24,6 +24,16 @@ public class Resolver : IDisposable
     private TimeSpan _timeout = System.Threading.Timeout.InfiniteTimeSpan;
     private CancellationTokenSource _pendingRequestsCts = new();
 
+    private DnsRecordCache _cache = new DnsRecordCache(TimeProvider.System);
+
+    private TimeProvider _timeProvider = TimeProvider.System;
+
+    internal void SetTimeProvider(TimeProvider timeProvider)
+    {
+        _timeProvider = timeProvider;
+        _cache = new DnsRecordCache(timeProvider);
+    }
+
     public Resolver() : this(OperatingSystem.IsWindows() ? NetworkInfo.GetOptions() : ResolvConf.GetOptions())
     {
     }
@@ -58,16 +68,104 @@ public class Resolver : IDisposable
         }
     }
 
-    private delegate TResult ParseResponseDataDelegate<TResult>(Span<byte> buffer, ref DnsMessageHeader header);
-    private async ValueTask<TResult> SendQueryAsync<TResult>(string name, QueryType queryType, ParseResponseDataDelegate<TResult> parseResponseBody, CancellationToken cancellationToken)
+    public async ValueTask<AddressResult[]> ResolveIPAddressesAsync(string name, AddressFamily addressFamily, CancellationToken cancellationToken = default)
+    {
+        if (addressFamily != AddressFamily.InterNetwork && addressFamily != AddressFamily.InterNetworkV6 && addressFamily != AddressFamily.Unspecified)
+        {
+            throw new NotSupportedException("IP only");
+        }
+
+        var queryType = addressFamily == AddressFamily.InterNetwork ? QueryType.Address : QueryType.IP6Address;
+
+        DnsCacheRecord record = await QueryAsync(name, queryType, cancellationToken);
+
+        var results = new List<AddressResult>(record.Answers.Count);
+
+        // servers send back CNAME records together with associated A/AAAA records
+        string currentAlias = name;
+
+        foreach (var answer in record.Answers)
+        {
+            if (answer.Name != currentAlias)
+            {
+                continue;
+            }
+
+            if (answer.Type == QueryType.Alias)
+            {
+                bool success = DnsPrimitives.TryReadQName(answer.Data.Span, 0, out currentAlias!, out _);
+                Debug.Assert(success, "Failed to read CNAME");
+                continue;
+            }
+
+            else if (answer.Type == queryType)
+            {
+                if (answer.Data.Length == IPv4Length || answer.Data.Length == IPv6Length)
+                {
+                    results.Add(new AddressResult(answer.Ttl, new IPAddress(answer.Data.Span), record.CreatedAt.AddSeconds(answer.Ttl)));
+                }
+            }
+        }
+
+        return results.ToArray();
+    }
+
+    internal async ValueTask<(DnsDataReader reader, DnsMessageHeader header)> SendDnsQueryCoreAsync(IPEndPoint serverEndPoint, string name, QueryType queryType, CancellationToken cancellationToken)
+    {
+        var buffer = new byte[512];
+        Memory<byte> memory = buffer;
+        (ushort transactionId, int length) = EncodeQuestion(memory, name, queryType);
+
+        using var socket = new Socket(serverEndPoint.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
+        await socket.ConnectAsync(serverEndPoint, cancellationToken);
+
+        await socket.SendAsync(memory.Slice(0, length), SocketFlags.None, cancellationToken);
+
+        DnsDataReader responseReader;
+        DnsMessageHeader header;
+
+        while (true)
+        {
+            int readLength = await socket.ReceiveAsync(memory, SocketFlags.None, cancellationToken);
+
+            if (readLength < HeaderSize)
+            {
+                continue;
+            }
+
+            responseReader = new DnsDataReader(memory);
+            if (!responseReader.TryReadHeader(out header) ||
+                header.TransactionId != transactionId ||
+                !header.IsResponse)
+            {
+                continue;
+            }
+
+            if (header.ResultTruncated)
+            {
+                // TODO: TCP fallback
+                throw new Exception("Invalid response: Truncated response");
+            }
+
+            return (responseReader, header);
+        }
+    }
+
+    internal ValueTask<DnsCacheRecord> QueryAsync(string name, QueryType queryType, CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (_cache.TryGet(name, queryType, out var record))
+        {
+            return ValueTask.FromResult(record);
+        }
 
         (CancellationTokenSource cts, bool disposeTokenSource, CancellationTokenSource pendingRequestsCts) = PrepareCancellationTokenSource(cancellationToken);
 
         try
         {
-            return await SendQueryAsyncCore(name, queryType, parseResponseBody, cts.Token);
+            return QueryAsyncSlow(name, queryType, cancellationToken);
         }
         catch (OperationCanceledException oce) when (
             !cancellationToken.IsCancellationRequested && // not cancelled by the caller
@@ -84,220 +182,70 @@ public class Resolver : IDisposable
                 cts.Dispose();
             }
         }
-    }
 
-    private async ValueTask<int> ReceiveResponseAsync(ushort queryId, Socket socket, Memory<byte> memory, CancellationToken cancellationToken)
-    {
-        do
+        async ValueTask<DnsCacheRecord> QueryAsyncSlow(string name, QueryType queryType, CancellationToken cancellationToken)
         {
-            int readLength = await socket.ReceiveAsync(memory, SocketFlags.None, cancellationToken);
+            DnsDataReader responseReader = default;
+            DnsMessageHeader header = default;
+            DateTime queryStartedTime = default;
 
-            if (readLength < HeaderSize)
+            foreach (IPEndPoint serverEndPoint in _options.Servers)
             {
-                continue;
-            }
+                queryStartedTime = _timeProvider.GetUtcNow().DateTime;
+                (responseReader, header) = await SendDnsQueryCoreAsync(serverEndPoint, name, queryType, cancellationToken);
 
-            DnsMessageHeader header = MemoryMarshal.AsRef<DnsMessageHeader>(memory.Span);
-            if (header.TransactionId != queryId)
-            {
-                // possibly a response to a previous query which timed out and the socket was reused.
-                continue;
-            }
-
-            if (!header.IsResponse)
-            {
-                // this is a query, not a response.
-                continue;
-            }
-
-            return readLength;
-        } while (true);
-    }
-
-    private async ValueTask<TResult> SendQueryAsyncCore<TResult>(string name, QueryType queryType, ParseResponseDataDelegate<TResult> parseResponseBody, CancellationToken cancellationToken)
-    {
-        byte[] buffer = ArrayPool<byte>.Shared.Rent(512);
-        byte[]? tcpBuffer = null;
-        try
-        {
-            // TODO: Implement UDP retries.
-            Memory<byte> memory = new Memory<byte>(buffer);
-            int questionSize = EncodeQuestion(memory, name, queryType);
-            ushort queryId = MemoryMarshal.AsRef<DnsMessageHeader>(memory.Span).TransactionId;
-
-            using Socket udpSocket = new(_serverEndPoint.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
-            await udpSocket.ConnectAsync(_serverEndPoint);
-            await udpSocket.SendAsync(memory.Slice(0, questionSize), cancellationToken);
-
-            int readLength = await ReceiveResponseAsync(queryId, udpSocket, memory, cancellationToken);
-
-            TResult? result = DoParseResponse(name, queryId, buffer.AsMemory(0, readLength), parseResponseBody);
-
-            if (result is null)
-            {
-                using Socket tcpSocket = new Socket(_serverEndPoint.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
-                await tcpSocket.ConnectAsync(_serverEndPoint);
-
-                // The TCP message is prefixed with the 2-byte length
-                questionSize = EncodeQuestion(memory.Slice(2), name, queryType);
-                queryId = MemoryMarshal.AsRef<DnsMessageHeader>(memory.Slice(2).Span).TransactionId;
-                BinaryPrimitives.WriteUInt16BigEndian(buffer, (ushort)questionSize);
-
-                await tcpSocket.SendAsync(memory.Slice(0, questionSize + 2), cancellationToken);
-
-                readLength = await tcpSocket.ReceiveAsync(memory.Slice(0, 2), cancellationToken);
-                Assert(readLength == 2); // TODO: implement robust reading
-
-                // The TCP message is prefixed with the 2-byte length
-                int responseSize = BinaryPrimitives.ReadUInt16BigEndian(buffer);
-                tcpBuffer = ArrayPool<byte>.Shared.Rent(responseSize);
-                memory = new Memory<byte>(tcpBuffer);
-
-                for (int offset = 0; offset < responseSize; offset += readLength)
+                if (header.QueryCount != 1 ||
+                    !responseReader.TryReadQuestion(out var qName, out var qType, out var qClass) ||
+                    qName != name || qType != queryType || qClass != QueryClass.Internet)
                 {
-                    readLength = await tcpSocket.ReceiveAsync(memory.Slice(offset), cancellationToken);
+                    // TODO: do we care?
+                    throw new Exception("Invalid response: Query mismatch");
+                    // return default;
                 }
 
-                result = DoParseResponse(name, queryId, tcpBuffer.AsMemory(0, responseSize), parseResponseBody);
-            }
-
-            return result is null ? throw new Exception("Invalid response: Truncated TCP!") : result;
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(buffer);
-
-            if (tcpBuffer != null)
-            {
-                ArrayPool<byte>.Shared.Return(tcpBuffer);
-            }
-        }
-
-        static TResult? DoParseResponse(string name, ushort queryId, Memory<byte> buffer, ParseResponseDataDelegate<TResult> parseResponseBody)
-        {
-            DnsDataReader reader = new DnsDataReader(buffer);
-            if (!reader.TryReadHeader(out DnsMessageHeader header))
-            {
-                return default;
-            }
-
-            Log($"T:{header.TransactionId} questions {header.QueryCount} Answers {header.AnswerCount} length {buffer.Length}");
-            if (header.TransactionId != queryId)
-            {
-                if (!DnsPrimitives.TryReadQName(buffer.Span, HeaderSize, out string? responseFor, out _))
+                if (header.ResponseCode == QueryResponseCode.NoError)
                 {
-                    return default;
+                    break;
+                }
+            }
+
+            if (header.ResponseCode != QueryResponseCode.NoError)
+            {
+                // TODO: all servers failed, cache the failure
+                throw new Exception("Invalid response: Query failed");
+            }
+
+            int ttl = int.MaxValue;
+            List<DnsResourceRecord> answers = ReadRecords(header.AnswerCount, ref ttl, ref responseReader);
+            List<DnsResourceRecord> authorities = ReadRecords(header.AuthorityCount, ref ttl, ref responseReader);
+            List<DnsResourceRecord> additionals = ReadRecords(header.AdditionalRecordCount, ref ttl, ref responseReader);
+
+            DnsCacheRecord record = new(queryStartedTime, queryStartedTime.AddSeconds(ttl), answers, authorities, additionals);
+            _cache.TryAdd(name, queryType, record);
+            return record;
+
+            static List<DnsResourceRecord> ReadRecords(int count, ref int ttl, ref DnsDataReader reader)
+            {
+                List<DnsResourceRecord> records = new(count);
+
+                for (int i = 0; i < count; i++)
+                {
+                    if (!reader.TryReadResourceRecord(out var record))
+                    {
+                        // TODO how to handle corrupted responses?
+                        throw new Exception("Invalid response: Answer record");
+                    }
+
+                    ttl = Math.Min(ttl, record.Ttl);
+                    records.Add(new DnsResourceRecord(record.Name, record.Type, record.Class, record.Ttl, record.Data.ToArray()));
                 }
 
-                Console.WriteLine($"[{name}] T:{header.TransactionId} mismatch; questions {header.QueryCount} ({responseFor}) Answers {header.AnswerCount} length {buffer.Length}");
-                throw new Exception("Invalid response: TransactionId mismatch!");
-            }
-
-            return header.ResultTruncated ? default : parseResponseBody(buffer.Span, ref header);
-        }
-    }
-
-    public ValueTask<AddressResult[]> ResolveIPAddressAsync(string name, AddressFamily addressFamily, CancellationToken cancellationToken = default)
-    {
-        if (addressFamily != AddressFamily.InterNetwork && addressFamily != AddressFamily.InterNetworkV6 && addressFamily != AddressFamily.Unspecified)
-        {
-            throw new NotSupportedException("IP only");
-        }
-
-        // TODO name checks.
-        QueryType queryType = addressFamily == AddressFamily.InterNetwork ? QueryType.Address : QueryType.IP6Address;
-
-        return SendQueryAsync(name, queryType, ParseResponse, cancellationToken);
-
-        static AddressResult[] ParseResponse(Span<byte> buffer, ref DnsMessageHeader header)
-        {
-            int offset = SkipResponseQuestionSection(buffer, header.QueryCount);
-            var result = new AddressResult[header.AnswerCount];
-            int actualCount = ParseAddressRecords(buffer, ref offset, result);
-
-            if (actualCount != result.Length)
-            {
-                // throw new Exception($"Invalid response: expected {result.Length} Address records, got {actualCount}.");
-                return result.AsSpan(0, actualCount).ToArray();
-            }
-
-            return result;
-        }
-    }
-
-    public ValueTask<TxtResult[]> ResolveTextAsync(string name, CancellationToken cancellationToken = default)
-    {
-        return SendQueryAsync(name, QueryType.Text, ParseResponse, cancellationToken);
-
-        static TxtResult[] ParseResponse(Span<byte> buffer, ref DnsMessageHeader header)
-        {
-            int offset = SkipResponseQuestionSection(buffer, header.QueryCount);
-            var result = new TxtResult[header.AnswerCount];
-            int actualCount = ParseTxtRecords(buffer, ref offset, result);
-
-            if (actualCount != result.Length)
-            {
-                throw new Exception($"Invalid response: expected {result.Length} TXT records, got {actualCount}.");
-            }
-
-            return result;
-        }
-    }
-
-    public async ValueTask<ServiceResult[]> ResolveServiceAsync(string name, CancellationToken cancellationToken = default)
-        => (await ResolveServiceAsync(name, false, cancellationToken)).Services;
-
-    // https://www.rfc-editor.org/rfc/rfc2782.html: "Implementors are urged, but not required, to return the address record(s) in the Additional Data section."
-    // If no matching addresses are found, an empty array is being returned.
-    public async ValueTask<(ServiceResult[] Services, AddressResult[] Addresses)> ResolveServiceAndAddressesAsync(string name, CancellationToken cancellationToken = default)
-    {
-        var result = await ResolveServiceAsync(name, true, cancellationToken);
-        Assert(result.Addresses != null);
-        return (result.Services, result.Addresses!);
-    }
-
-    private ValueTask<(ServiceResult[] Services, AddressResult[]? Addresses)> ResolveServiceAsync(string name, bool includeAddresses, CancellationToken cancellationToken)
-    {
-        return SendQueryAsync(name, QueryType.Service, ParseResponse, cancellationToken);
-
-        (ServiceResult[], AddressResult[]?) ParseResponse(Span<byte> buffer, ref DnsMessageHeader header)
-        {
-            int offset = SkipResponseQuestionSection(buffer, header.QueryCount);
-            var result = new ServiceResult[header.AnswerCount];
-            int actualCount = ParseServiceRecords(buffer, ref offset, result);
-            if (actualCount != result.Length)
-            {
-                throw new Exception($"Invalid response: expected {result.Length} SRV records, got {actualCount}.");
-            }
-
-            if (includeAddresses)
-            {
-                if (header.AdditionalRecordCount == 0)
-                {
-                    return (result, Array.Empty<AddressResult>());
-                }
-
-                SkipRecords(buffer, ref offset, header.AuthorityCount);
-
-                AddressResult[] addresses = new AddressResult[header.AdditionalRecordCount];
-                actualCount = ParseAddressRecords(buffer, ref offset, addresses);
-
-                // If there were non A/AAAA records in the additional section, shrink the array.
-                if (actualCount < addresses.Length)
-                {
-                    Array.Resize(ref addresses, actualCount);
-                }
-
-                return (result, addresses);
-            }
-            else
-            {
-                return (result, null);
+                return records;
             }
         }
     }
 
-    private static int EncodeQuestion(Memory<byte> buffer, string name, QueryType queryType)
+    private static (ushort id, int length) EncodeQuestion(Memory<byte> buffer, string name, QueryType queryType)
     {
         DnsMessageHeader header = default;
         header.InitQueryHeader();
@@ -307,168 +255,7 @@ public class Resolver : IDisposable
         {
             throw new Exception("Buffer too small");
         }
-        return writer.Position;
-    }
-
-    private static int SkipResponseQuestionSection(Span<byte> buffer, int count)
-    {
-        int offset = HeaderSize;
-
-        // TBD should ve verify the answer is what we asked for? 
-        while (count > 0)
-        {
-            //DecodeName(buffer, offset);
-            int len = SkipName(buffer, offset);
-            int queryType = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(offset + len, 2));
-            int queryClass = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(offset + len + 2, 2));
-
-            Log($"SkipResponseQueries: type={queryType} class={queryClass} len={len}");
-            offset += len + 4;
-            count--;
-        }
-
-        return offset;
-    }
-
-    private static (QueryType, uint, int) ReadRecordHeader(Span<byte> buffer, ref int offset)
-    {
-        int nameLength = SkipName(buffer, offset);
-        offset += nameLength;
-
-        QueryType queryType = (QueryType)BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(offset, 2));
-        uint ttl = BinaryPrimitives.ReadUInt32BigEndian(buffer.Slice(offset + 4, 4));
-        int dataLength = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(offset + 8, 2));
-        offset += RecordHeaderLength;
-
-        Log($"Type {queryType} ttl = {ttl} data {dataLength}");
-
-        return (queryType, ttl, dataLength);
-    }
-
-    private static int ParseServiceRecords(Span<byte> buffer, ref int offset, Span<ServiceResult> result)
-    {
-        int index = 0;
-        int count = result.Length;
-        while (count > 0)
-        {
-            (QueryType queryType, uint ttl, int dataLength) = ReadRecordHeader(buffer, ref offset);
-
-            ref ServiceResult r = ref result[index];
-
-            if (queryType == QueryType.Service)
-            {
-                r.Priority = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(offset, 2));
-                r.Weight = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(offset + 2, 2));
-                r.Port = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(offset + 4, 2));
-                r.Ttl = (int)ttl;
-
-                if (!DnsPrimitives.TryReadQName(buffer, offset + 6, out string? responseFor, out _))
-                {
-                    responseFor = null;
-                }
-
-                // TODO: validation
-                r.Target = responseFor!;
-
-                index++;
-            }
-            else
-            {
-                // TBD logging?
-            }
-
-            offset += dataLength;
-            count--;
-        }
-
-        return index;
-    }
-
-    private static void SkipRecords(Span<byte> buffer, ref int offset, int count)
-    {
-        while (count > 0)
-        {
-            (_, _, int dataLength) = ReadRecordHeader(buffer, ref offset);
-            offset += dataLength;
-            count--;
-        }
-    }
-
-    private static int ParseAddressRecords(Span<byte> buffer, ref int offset, Span<AddressResult> result)
-    {
-        var index = 0;
-        int count = result.Length;
-        while (count > 0)
-        {
-            Log($"Processing answer {count} of {result.Length}");
-
-            (QueryType queryType, uint ttl, int dataLength) = ReadRecordHeader(buffer, ref offset);
-
-            ref AddressResult r = ref result[index];
-
-            if (queryType is QueryType.Address or QueryType.IP6Address)
-            {
-                Assert(queryType == QueryType.Address ? dataLength == IPv4Length : dataLength == IPv6Length);
-                r.Address = new IPAddress(buffer.Slice(offset, dataLength));
-                r.Ttl = (int)ttl;
-
-                index++;
-            }
-
-            offset += dataLength;
-            count--;
-        }
-
-        return index;
-    }
-
-    private static int ParseTxtRecords(Span<byte> buffer, ref int offset, TxtResult[] result)
-    {
-        int index = 0;
-        int count = result.Length;
-        while (count > 0)
-        {
-            (QueryType queryType, uint ttl, int dataLength) = ReadRecordHeader(buffer, ref offset);
-
-            ref TxtResult r = ref result[index];
-
-            if (queryType is QueryType.Text)
-            {
-                r.Ttl = (int)ttl;
-                r.Data = new byte[dataLength];
-                buffer.Slice(offset, dataLength).CopyTo(r.Data);
-                index++;
-            }
-
-            offset += dataLength;
-            count--;
-        }
-
-        return index;
-    }
-
-    private static int SkipName(Span<byte> buffer, int offset)
-    {
-        int index = offset;
-        while (true)
-        {
-            if (buffer[index] == 0)
-            {
-                index++;
-                break;
-            }
-            else if ((buffer[index] & (byte)0xc0) == 0xc0)
-            {
-                index += 2;
-                break;
-            }
-            else
-            {
-                index += buffer[index] + 1;
-            }
-        }
-
-        return index - offset;
+        return (header.TransactionId, writer.Position);
     }
 
     public void Dispose()
@@ -483,21 +270,6 @@ public class Resolver : IDisposable
             _pendingRequestsCts.Cancel();
             _pendingRequestsCts.Dispose();
         }
-    }
-
-    private static void Log(FormattableString str)
-    {
-        // Console.WriteLine(str);
-    }
-
-    private static void Assert(bool condition)
-    {
-        if (!condition)
-        {
-            throw new Exception("Assertion failed");
-        }
-
-        // Debug.Assert(condition);
     }
 
     private (CancellationTokenSource TokenSource, bool DisposeTokenSource, CancellationTokenSource PendingRequestsCts) PrepareCancellationTokenSource(CancellationToken cancellationToken)

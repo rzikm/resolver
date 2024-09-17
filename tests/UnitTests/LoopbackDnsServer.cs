@@ -43,6 +43,7 @@ internal class LoopbackDnsServer : IDisposable
         LoopbackDnsResponseBuilder responseBuilder = new((IPEndPoint)result.RemoteEndPoint!, name, type, @class);
         responseBuilder.TransactionId = header.TransactionId;
         responseBuilder.Flags = header.QueryFlags | QueryFlags.HasResponse;
+        responseBuilder.ResponseCode = QueryResponseCode.NoError;
 
         await action(responseBuilder);
 
@@ -51,6 +52,7 @@ internal class LoopbackDnsServer : IDisposable
         {
             TransactionId = responseBuilder.TransactionId,
             QueryFlags = responseBuilder.Flags,
+            ResponseCode = responseBuilder.ResponseCode,
             QueryCount = (ushort)responseBuilder.Questions.Count,
             AnswerCount = (ushort)responseBuilder.Answers.Count,
             AuthorityCount = (ushort)responseBuilder.Authorities.Count,
@@ -111,6 +113,7 @@ internal class LoopbackDnsResponseBuilder
 
     public ushort TransactionId { get; set; }
     public QueryFlags Flags { get; set; }
+    public QueryResponseCode ResponseCode { get; set; }
 
     public string Name { get; }
     public QueryType Type { get; }

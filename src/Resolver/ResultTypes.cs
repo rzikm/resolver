@@ -3,7 +3,7 @@ using System.Text;
 
 namespace Resolver;
 
-public record struct AddressResult(int Ttl, IPAddress Address);
+public record struct AddressResult(int Ttl, IPAddress Address, DateTime ExpiresAt);
 
 public record struct ServiceResult(int Ttl, int Priority, int Weight, int Port, string Target);
 

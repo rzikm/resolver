@@ -15,20 +15,22 @@ public class DnsRecordCacheTests
     public void TryGet_Success()
     {
         DnsResourceRecord record = new DnsResourceRecord("www.example.com", QueryType.Address, QueryClass.Internet, 3600, new byte[4]);
-        DnsCacheRecord cacheRecord = new DnsCacheRecord(new() { record }, TimeProvider.GetUtcNow().AddSeconds(3600));
+        DnsCacheRecord cacheRecord = new DnsCacheRecord(TimeProvider.GetUtcNow().DateTime, TimeProvider.GetUtcNow().DateTime.AddSeconds(3600), new() { record }, new(), new());
 
         Assert.True(Cache.TryAdd(record.Name, QueryType.Address, cacheRecord));
         Assert.True(Cache.TryGet(record.Name, QueryType.Address, out DnsCacheRecord outRecord));
 
         Assert.Equal(cacheRecord.Expiration, outRecord.Expiration);
-        Assert.Equal(cacheRecord.Records, outRecord.Records);
+        Assert.Equal(cacheRecord.Answers, outRecord.Answers);
+        Assert.Equal(cacheRecord.Authorities, outRecord.Authorities);
+        Assert.Equal(cacheRecord.Additionals, outRecord.Additionals);
     }
 
     [Fact]
     public void TryGet_KeyNotExists_Fails()
     {
         DnsResourceRecord record = new DnsResourceRecord("www.example.com", QueryType.Address, QueryClass.Internet, 3600, new byte[4]);
-        DnsCacheRecord cacheRecord = new DnsCacheRecord(new() { record }, TimeProvider.GetUtcNow().AddSeconds(3600));
+        DnsCacheRecord cacheRecord = new DnsCacheRecord(TimeProvider.GetUtcNow().DateTime, TimeProvider.GetUtcNow().DateTime.AddSeconds(3600), new() { record }, new(), new());
 
         Assert.True(Cache.TryAdd(record.Name, QueryType.Address, cacheRecord));
 
@@ -40,7 +42,7 @@ public class DnsRecordCacheTests
     public void TryGet_Expired_Fails()
     {
         DnsResourceRecord record = new DnsResourceRecord("www.example.com", QueryType.Address, QueryClass.Internet, 3600, new byte[4]);
-        DnsCacheRecord cacheRecord = new DnsCacheRecord(new() { record }, TimeProvider.GetUtcNow().AddSeconds(3600));
+        DnsCacheRecord cacheRecord = new DnsCacheRecord(TimeProvider.GetUtcNow().DateTime, TimeProvider.GetUtcNow().DateTime.AddSeconds(3600), new() { record }, new(), new());
 
         Assert.True(Cache.TryAdd(record.Name, QueryType.Address, cacheRecord));
         TimeProvider.Advance(TimeSpan.FromSeconds(3601));

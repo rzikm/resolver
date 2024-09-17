@@ -4,13 +4,19 @@ namespace Resolver;
 
 internal struct DnsCacheRecord
 {
-    public List<DnsResourceRecord> Records { get; }
-    public DateTimeOffset Expiration { get; }
+    public List<DnsResourceRecord> Answers { get; }
+    public List<DnsResourceRecord> Authorities { get; }
+    public List<DnsResourceRecord> Additionals { get; }
+    public DateTime CreatedAt { get; }
+    public DateTime Expiration { get; }
 
-    public DnsCacheRecord(List<DnsResourceRecord> records, DateTimeOffset expiration)
+    public DnsCacheRecord(DateTime createdAt, DateTime expiration, List<DnsResourceRecord> answers, List<DnsResourceRecord> authorities, List<DnsResourceRecord> additionals)
     {
-        Records = records;
+        CreatedAt = createdAt;
         Expiration = expiration;
+        Answers = answers;
+        Authorities = authorities;
+        Additionals = additionals;
     }
 }
 
@@ -55,7 +61,7 @@ internal class DnsRecordCache
     public bool TryGet(string name, QueryType type, out DnsCacheRecord record)
     {
         var key = new DnsCacheKey(name, type);
-        if (_cache.TryGetValue(key, out var r) && r.Expiration > _timeProvider.GetUtcNow())
+        if (_cache.TryGetValue(key, out var r) && r.Expiration > _timeProvider.GetUtcNow().DateTime)
         {
             record = r;
             return true;

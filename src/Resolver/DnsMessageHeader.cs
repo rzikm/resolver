@@ -67,6 +67,12 @@ internal struct DnsMessageHeader
         }
     }
 
+    internal QueryResponseCode ResponseCode
+    {
+        get => (QueryResponseCode)(_flags & 0xF);
+        set => _flags = (ushort)((_flags & 0xFFF0) | (ushort)value);
+    }
+
     internal bool ResultTruncated => (QueryFlags & QueryFlags.ResultTruncated) != 0;
 
     internal bool IsResponse
