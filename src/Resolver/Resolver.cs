@@ -19,7 +19,6 @@ public class Resolver : IDisposable
     private static readonly TimeSpan s_maxTimeout = TimeSpan.FromMilliseconds(int.MaxValue);
 
     bool _disposed = false;
-    private IPEndPoint _serverEndPoint;
     private ResolverOptions _options;
     private TimeSpan _timeout = System.Threading.Timeout.InfiniteTimeSpan;
     private CancellationTokenSource _pendingRequestsCts = new();
@@ -41,7 +40,6 @@ public class Resolver : IDisposable
     public Resolver(ResolverOptions options)
     {
         _options = options;
-        _serverEndPoint = _options.Servers[0];
     }
 
     public Resolver(IEnumerable<IPEndPoint> servers) : this(new ResolverOptions(servers.ToArray()))
@@ -161,25 +159,30 @@ public class Resolver : IDisposable
             return ValueTask.FromResult(record);
         }
 
-        (CancellationTokenSource cts, bool disposeTokenSource, CancellationTokenSource pendingRequestsCts) = PrepareCancellationTokenSource(cancellationToken);
+        return QueryWithTimeoutAsync(name, queryType, cancellationToken);
 
-        try
+        async ValueTask<DnsCacheRecord> QueryWithTimeoutAsync(string name, QueryType queryType, CancellationToken cancellationToken)
         {
-            return QueryAsyncSlow(name, queryType, cancellationToken);
-        }
-        catch (OperationCanceledException oce) when (
-            !cancellationToken.IsCancellationRequested && // not cancelled by the caller
-            !pendingRequestsCts.IsCancellationRequested) // not cancelled by the global token (dispose)
-                                                         // the only remaining token that could cancel this is the linked cts from the timeout.
-        {
-            Debug.Assert(cts.Token.IsCancellationRequested);
-            throw new TimeoutException("The operation has timed out.", oce);
-        }
-        finally
-        {
-            if (disposeTokenSource)
+            (CancellationTokenSource cts, bool disposeTokenSource, CancellationTokenSource pendingRequestsCts) = PrepareCancellationTokenSource(cancellationToken);
+
+            try
             {
-                cts.Dispose();
+                return await QueryAsyncSlow(name, queryType, cts.Token);
+            }
+            catch (OperationCanceledException oce) when (
+                !cancellationToken.IsCancellationRequested && // not cancelled by the caller
+                !pendingRequestsCts.IsCancellationRequested) // not cancelled by the global token (dispose)
+                                                             // the only remaining token that could cancel this is the linked cts from the timeout.
+            {
+                Debug.Assert(cts.Token.IsCancellationRequested);
+                throw new TimeoutException("The operation has timed out.", oce);
+            }
+            finally
+            {
+                if (disposeTokenSource)
+                {
+                    cts.Dispose();
+                }
             }
         }
 
