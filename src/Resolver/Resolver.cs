@@ -3,6 +3,7 @@ using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection.Metadata.Ecma335;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -66,6 +67,35 @@ public class Resolver : IDisposable
         }
     }
 
+    public async ValueTask<ServiceResult[]> ResolveServiceAsync(string name, CancellationToken cancellationToken = default)
+    {
+        DnsCacheRecord record = await QueryAsync(name, QueryType.SRV, cancellationToken);
+
+        var results = new List<ServiceResult>(record.Answers.Count);
+
+        foreach (var answer in record.Answers)
+        {
+            if (answer.Type == QueryType.SRV)
+            {
+                bool success = DnsPrimitives.TryReadService(answer.Data.Span, out ushort priority, out ushort weight, out ushort port, out string? target, out _);
+                Debug.Assert(success, "Failed to read SRV");
+
+                List<AddressResult> addresses = new List<AddressResult>();
+                foreach (var additional in record.Additionals)
+                {
+                    if (additional.Name == target && (additional.Type == QueryType.A || additional.Type == QueryType.AAAA))
+                    {
+                        addresses.Add(new AddressResult(record.CreatedAt.AddSeconds(additional.Ttl), new IPAddress(additional.Data.Span)));
+                    }
+                }
+
+                results.Add(new ServiceResult(record.CreatedAt.AddSeconds(answer.Ttl), priority, weight, port, target!, addresses.ToArray()));
+            }
+        }
+
+        return results.ToArray();
+    }
+
     public async ValueTask<AddressResult[]> ResolveIPAddressesAsync(string name, AddressFamily addressFamily, CancellationToken cancellationToken = default)
     {
         if (addressFamily != AddressFamily.InterNetwork && addressFamily != AddressFamily.InterNetworkV6 && addressFamily != AddressFamily.Unspecified)
@@ -73,7 +103,7 @@ public class Resolver : IDisposable
             throw new NotSupportedException("IP only");
         }
 
-        var queryType = addressFamily == AddressFamily.InterNetwork ? QueryType.Address : QueryType.IP6Address;
+        var queryType = addressFamily == AddressFamily.InterNetwork ? QueryType.A : QueryType.AAAA;
 
         DnsCacheRecord record = await QueryAsync(name, queryType, cancellationToken);
 
@@ -89,7 +119,7 @@ public class Resolver : IDisposable
                 continue;
             }
 
-            if (answer.Type == QueryType.Alias)
+            if (answer.Type == QueryType.CNAME)
             {
                 bool success = DnsPrimitives.TryReadQName(answer.Data.Span, 0, out currentAlias!, out _);
                 Debug.Assert(success, "Failed to read CNAME");
@@ -98,10 +128,8 @@ public class Resolver : IDisposable
 
             else if (answer.Type == queryType)
             {
-                if (answer.Data.Length == IPv4Length || answer.Data.Length == IPv6Length)
-                {
-                    results.Add(new AddressResult(answer.Ttl, new IPAddress(answer.Data.Span), record.CreatedAt.AddSeconds(answer.Ttl)));
-                }
+                Debug.Assert(answer.Data.Length == IPv4Length || answer.Data.Length == IPv6Length);
+                results.Add(new AddressResult(record.CreatedAt.AddSeconds(answer.Ttl), new IPAddress(answer.Data.Span)));
             }
         }
 

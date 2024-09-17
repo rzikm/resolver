@@ -1,12 +1,11 @@
 using System.Net;
 using System.Net.Sockets;
-using System.Runtime.CompilerServices;
 
 namespace UnitTests;
 
-public class LoopbackDnsTests : LoopbackDnsTestBase
+public class ResolveAddressesTests : LoopbackDnsTestBase
 {
-    public LoopbackDnsTests(ITestOutputHelper output) : base(output)
+    public ResolveAddressesTests(ITestOutputHelper output) : base(output)
     {
     }
 
@@ -24,7 +23,7 @@ public class LoopbackDnsTests : LoopbackDnsTestBase
 
         AddressResult res = Assert.Single(results);
         Assert.Equal(address, res.Address);
-        Assert.Equal(3600, res.Ttl);
+        Assert.Equal(TimeProvider.GetUtcNow().DateTime.AddSeconds(3600), res.ExpiresAt);
     }
 
 
@@ -44,7 +43,7 @@ public class LoopbackDnsTests : LoopbackDnsTestBase
 
         AddressResult res = Assert.Single(results);
         Assert.Equal(address, res.Address);
-        Assert.Equal(3600, res.Ttl);
+        Assert.Equal(TimeProvider.GetUtcNow().DateTime.AddSeconds(3600), res.ExpiresAt);
     }
 
     [Fact]

@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Text;
@@ -157,5 +158,39 @@ internal static class DnsPrimitives
             name = null;
             return false;
         }
+    }
+
+    internal static bool TryReadService(ReadOnlySpan<byte> buffer, out ushort priority, out ushort weight, out ushort port, [NotNullWhen(true)] out string? target, out int bytesRead)
+    {
+        if (!BinaryPrimitives.TryReadUInt16BigEndian(buffer, out priority) ||
+            !BinaryPrimitives.TryReadUInt16BigEndian(buffer.Slice(2), out weight) ||
+            !BinaryPrimitives.TryReadUInt16BigEndian(buffer.Slice(4), out port) ||
+            !TryReadQName(buffer.Slice(6), 0, out target, out bytesRead))
+        {
+            target = null;
+            priority = 0;
+            weight = 0;
+            port = 0;
+            bytesRead = 0;
+            return false;
+        }
+
+        bytesRead += 6;
+        return true;
+    }
+
+    internal static bool TryWriteService(Span<byte> buffer, ushort priority, ushort weight, ushort port, string target, out int bytesWritten)
+    {
+        if (!BinaryPrimitives.TryWriteUInt16BigEndian(buffer, priority) ||
+            !BinaryPrimitives.TryWriteUInt16BigEndian(buffer.Slice(2), weight) ||
+            !BinaryPrimitives.TryWriteUInt16BigEndian(buffer.Slice(4), port) ||
+            !TryWriteQName(buffer.Slice(6), target, out bytesWritten))
+        {
+            bytesWritten = 0;
+            return false;
+        }
+
+        bytesWritten += 6;
+        return true;
     }
 }

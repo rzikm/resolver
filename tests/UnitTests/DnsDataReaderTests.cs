@@ -25,7 +25,7 @@ public class DnsDataReaderTests
         Assert.True(reader.TryReadResourceRecord(out DnsResourceRecord record));
 
         Assert.Equal("www.example.com", record.Name);
-        Assert.Equal(QueryType.Address, record.Type);
+        Assert.Equal(QueryType.A, record.Type);
         Assert.Equal(QueryClass.Internet, record.Class);
         Assert.Equal(3600, record.Ttl);
         Assert.Equal(4, record.Data.Length);

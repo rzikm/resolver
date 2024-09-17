@@ -10,7 +10,7 @@ public abstract class LoopbackDnsTestBase : IDisposable
 
     internal readonly LoopbackDnsServer DnsServer;
     protected readonly Resolver.Resolver Resolver;
-    private readonly TestTimeProvider _timeProvider;
+    protected readonly TestTimeProvider TimeProvider;
 
     [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "SetTimeProvider")]
     extern static void MockTimeProvider(Resolver.Resolver instance, TimeProvider provider);
@@ -21,8 +21,8 @@ public abstract class LoopbackDnsTestBase : IDisposable
         DnsServer = new();
         Resolver = new([DnsServer.DnsEndPoint]);
         Resolver.Timeout = TimeSpan.FromSeconds(5);
-        _timeProvider = new();
-        MockTimeProvider(Resolver, _timeProvider);
+        TimeProvider = new();
+        MockTimeProvider(Resolver, TimeProvider);
     }
 
     public void Dispose()

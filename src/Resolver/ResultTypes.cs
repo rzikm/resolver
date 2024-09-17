@@ -3,9 +3,9 @@ using System.Text;
 
 namespace Resolver;
 
-public record struct AddressResult(int Ttl, IPAddress Address, DateTime ExpiresAt);
+public record struct AddressResult(DateTime ExpiresAt, IPAddress Address);
 
-public record struct ServiceResult(int Ttl, int Priority, int Weight, int Port, string Target);
+public record struct ServiceResult(DateTime ExpiresAt, int Priority, int Weight, int Port, string Target, AddressResult[] Addresses);
 
 public record struct TxtResult(int Ttl, byte[] Data)
 {

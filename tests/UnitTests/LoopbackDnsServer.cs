@@ -129,7 +129,7 @@ internal static class LoopbackDnsServerExtensions
 {
     public static List<DnsResourceRecord> AddAddress(this List<DnsResourceRecord> records, string name, int ttl, IPAddress address)
     {
-        QueryType type = address.AddressFamily == AddressFamily.InterNetwork ? QueryType.Address : QueryType.IP6Address;
+        QueryType type = address.AddressFamily == AddressFamily.InterNetwork ? QueryType.A : QueryType.AAAA;
         records.Add(new DnsResourceRecord(name, type, QueryClass.Internet, ttl, address.GetAddressBytes()));
         return records;
     }
@@ -142,7 +142,19 @@ internal static class LoopbackDnsServerExtensions
             throw new InvalidOperationException("Failed to encode domain name");
         }
 
-        records.Add(new DnsResourceRecord(name, QueryType.Alias, QueryClass.Internet, ttl, buff.AsMemory(0, length)));
+        records.Add(new DnsResourceRecord(name, QueryType.CNAME, QueryClass.Internet, ttl, buff.AsMemory(0, length)));
+        return records;
+    }
+
+    public static List<DnsResourceRecord> AddService(this List<DnsResourceRecord> records, string name, int ttl, ushort priority, ushort weight, ushort port, string target)
+    {
+        byte[] buff = new byte[256];
+        if (!DnsPrimitives.TryWriteService(buff, priority, weight, port, target, out int length))
+        {
+            throw new InvalidOperationException("Failed to encode domain name");
+        }
+
+        records.Add(new DnsResourceRecord(name, QueryType.SRV, QueryClass.Internet, ttl, buff.AsMemory(0, length)));
         return records;
     }
 }

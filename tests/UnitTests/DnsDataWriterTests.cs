@@ -23,7 +23,7 @@ public class DnsDataWriterTests
             0x00, 0x00, 0x00, 0x00
         ];
 
-        DnsResourceRecord record = new DnsResourceRecord("www.example.com", QueryType.Address, QueryClass.Internet, 3600, new byte[4]);
+        DnsResourceRecord record = new DnsResourceRecord("www.example.com", QueryType.A, QueryClass.Internet, 3600, new byte[4]);
 
         byte[] buffer = new byte[512];
         DnsDataWriter writer = new DnsDataWriter(buffer);
@@ -50,7 +50,7 @@ public class DnsDataWriterTests
             0x00, 0x00, 0x00, 0x00
         ];
 
-        DnsResourceRecord record = new DnsResourceRecord("www.example.com", QueryType.Address, QueryClass.Internet, 3600, new byte[4]);
+        DnsResourceRecord record = new DnsResourceRecord("www.example.com", QueryType.A, QueryClass.Internet, 3600, new byte[4]);
 
         byte[] buffer = new byte[512];
         for (int i = 0; i < expected.Length; i++)
@@ -75,7 +75,7 @@ public class DnsDataWriterTests
 
         byte[] buffer = new byte[512];
         DnsDataWriter writer = new DnsDataWriter(buffer);
-        Assert.True(writer.TryWriteQuestion("www.example.com", QueryType.Address, QueryClass.Internet));
+        Assert.True(writer.TryWriteQuestion("www.example.com", QueryType.A, QueryClass.Internet));
         Assert.Equal(expected, buffer.AsSpan().Slice(0, writer.Position).ToArray());
     }
 
@@ -96,7 +96,7 @@ public class DnsDataWriterTests
         for (int i = 0; i < expected.Length; i++)
         {
             DnsDataWriter writer = new DnsDataWriter(buffer.AsMemory(0, i));
-            Assert.False(writer.TryWriteQuestion("www.example.com", QueryType.Address, QueryClass.Internet));
+            Assert.False(writer.TryWriteQuestion("www.example.com", QueryType.A, QueryClass.Internet));
         }
     }
 
