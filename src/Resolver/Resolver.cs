@@ -114,7 +114,7 @@ public class Resolver : IDisposable
 
         if (addressFamily != AddressFamily.InterNetwork && addressFamily != AddressFamily.InterNetworkV6 && addressFamily != AddressFamily.Unspecified)
         {
-            throw new NotSupportedException("IP only");
+            throw new ArgumentOutOfRangeException(nameof(addressFamily), addressFamily, "Invalid address family");
         }
 
         var queryType = addressFamily == AddressFamily.InterNetwork ? QueryType.A : QueryType.AAAA;

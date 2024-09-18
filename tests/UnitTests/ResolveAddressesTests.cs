@@ -10,7 +10,7 @@ public class ResolveAddressesTests : LoopbackDnsTestBase
     }
 
     [Fact]
-    public async void ResolveIPv4_Simple_Success()
+    public async Task ResolveIPv4_Simple_Success()
     {
         IPAddress address = IPAddress.Parse("172.213.245.111");
         _ = DnsServer.ProcessUdpRequest(builder =>
@@ -28,7 +28,7 @@ public class ResolveAddressesTests : LoopbackDnsTestBase
 
 
     [Fact]
-    public async void ResolveIPv4_Aliases_Success()
+    public async Task ResolveIPv4_Aliases_Success()
     {
         IPAddress address = IPAddress.Parse("172.213.245.111");
         _ = DnsServer.ProcessUdpRequest(builder =>
@@ -47,7 +47,7 @@ public class ResolveAddressesTests : LoopbackDnsTestBase
     }
 
     [Fact]
-    public async void ResolveIPv4_Aliases_NotFound_Success()
+    public async Task ResolveIPv4_Aliases_NotFound_Success()
     {
         IPAddress address = IPAddress.Parse("172.213.245.111");
         _ = DnsServer.ProcessUdpRequest(builder =>
@@ -63,5 +63,30 @@ public class ResolveAddressesTests : LoopbackDnsTestBase
         AddressResult[] results = await Resolver.ResolveIPAddressesAsync("www.example.com", AddressFamily.InterNetwork);
 
         Assert.Empty(results);
+    }
+
+    [Fact]
+    public async Task ResolveIP_InvalidAddressFamily_Throws()
+    {
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(async () => await Resolver.ResolveIPAddressesAsync("www.example.com", AddressFamily.Unknown));
+    }
+
+    [Fact]
+    public async Task ResolveIP_Cached_Success()
+    {
+        IPAddress address = IPAddress.Parse("172.213.245.111");
+        _ = DnsServer.ProcessUdpRequest(builder =>
+        {
+            builder.Answers.AddAddress("www.example.com", 3600, address);
+            return Task.CompletedTask;
+        });
+
+        AddressResult[] results = await Resolver.ResolveIPAddressesAsync("www.example.com", AddressFamily.InterNetwork);
+
+        AddressResult res = Assert.Single(results);
+        DnsServer.Dispose();
+
+        AddressResult cached = Assert.Single(await Resolver.ResolveIPAddressesAsync("www.example.com", AddressFamily.InterNetwork));
+        Assert.Equal(res, cached);
     }
 }
