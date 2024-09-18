@@ -2,7 +2,7 @@ using System.Collections.Concurrent;
 
 namespace Resolver;
 
-internal struct DnsCacheRecord
+internal struct DnsResponse
 {
     public List<DnsResourceRecord> Answers { get; }
     public List<DnsResourceRecord> Authorities { get; }
@@ -10,7 +10,7 @@ internal struct DnsCacheRecord
     public DateTime CreatedAt { get; }
     public DateTime Expiration { get; }
 
-    public DnsCacheRecord(DateTime createdAt, DateTime expiration, List<DnsResourceRecord> answers, List<DnsResourceRecord> authorities, List<DnsResourceRecord> additionals)
+    public DnsResponse(DateTime createdAt, DateTime expiration, List<DnsResourceRecord> answers, List<DnsResourceRecord> authorities, List<DnsResourceRecord> additionals)
     {
         CreatedAt = createdAt;
         Expiration = expiration;
@@ -20,7 +20,21 @@ internal struct DnsCacheRecord
     }
 }
 
-internal class DnsRecordCache
+internal struct DnsCacheRecord
+{
+    public DateTime CreatedAt { get; }
+    public DateTime Expiration { get; }
+    public object Result { get; }
+
+    public DnsCacheRecord(DateTime createdAt, DateTime expiration, object result)
+    {
+        CreatedAt = createdAt;
+        Expiration = expiration;
+        Result = result;
+    }
+}
+
+internal class DnsResultCache
 {
     private struct DnsCacheKey : IEquatable<DnsCacheKey>
     {
@@ -53,7 +67,7 @@ internal class DnsRecordCache
 
     private readonly ConcurrentDictionary<DnsCacheKey, DnsCacheRecord> _cache = new();
 
-    public DnsRecordCache(TimeProvider timeProvider)
+    public DnsResultCache(TimeProvider timeProvider)
     {
         _timeProvider = timeProvider;
     }

@@ -24,14 +24,14 @@ public class Resolver : IDisposable
     private TimeSpan _timeout = System.Threading.Timeout.InfiniteTimeSpan;
     private CancellationTokenSource _pendingRequestsCts = new();
 
-    private DnsRecordCache _cache = new DnsRecordCache(TimeProvider.System);
+    private DnsResultCache _cache = new DnsResultCache(TimeProvider.System);
 
     private TimeProvider _timeProvider = TimeProvider.System;
 
     internal void SetTimeProvider(TimeProvider timeProvider)
     {
         _timeProvider = timeProvider;
-        _cache = new DnsRecordCache(timeProvider);
+        _cache = new DnsResultCache(timeProvider);
     }
 
     public Resolver() : this(OperatingSystem.IsWindows() ? NetworkInfo.GetOptions() : ResolvConf.GetOptions())
@@ -69,7 +69,16 @@ public class Resolver : IDisposable
 
     public async ValueTask<ServiceResult[]> ResolveServiceAsync(string name, CancellationToken cancellationToken = default)
     {
-        DnsCacheRecord record = await QueryAsync(name, QueryType.SRV, cancellationToken);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var queryType = QueryType.SRV;
+        if (_cache.TryGet(name, queryType, out DnsCacheRecord cached))
+        {
+            return (ServiceResult[])cached.Result;
+        }
+
+        DnsResponse record = await SendQueryAsync(name, QueryType.SRV, cancellationToken);
 
         var results = new List<ServiceResult>(record.Answers.Count);
 
@@ -93,19 +102,28 @@ public class Resolver : IDisposable
             }
         }
 
-        return results.ToArray();
+        var result = results.ToArray();
+        _cache.TryAdd(name, queryType, new DnsCacheRecord(record.CreatedAt, record.Expiration, result));
+        return result;
     }
 
     public async ValueTask<AddressResult[]> ResolveIPAddressesAsync(string name, AddressFamily addressFamily, CancellationToken cancellationToken = default)
     {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        cancellationToken.ThrowIfCancellationRequested();
+
         if (addressFamily != AddressFamily.InterNetwork && addressFamily != AddressFamily.InterNetworkV6 && addressFamily != AddressFamily.Unspecified)
         {
             throw new NotSupportedException("IP only");
         }
 
         var queryType = addressFamily == AddressFamily.InterNetwork ? QueryType.A : QueryType.AAAA;
+        if (_cache.TryGet(name, queryType, out DnsCacheRecord cached))
+        {
+            return (AddressResult[])cached.Result;
+        }
 
-        DnsCacheRecord record = await QueryAsync(name, queryType, cancellationToken);
+        DnsResponse record = await SendQueryAsync(name, queryType, cancellationToken);
 
         var results = new List<AddressResult>(record.Answers.Count);
 
@@ -133,7 +151,9 @@ public class Resolver : IDisposable
             }
         }
 
-        return results.ToArray();
+        var result = results.ToArray();
+        _cache.TryAdd(name, queryType, new DnsCacheRecord(record.CreatedAt, record.Expiration, result));
+        return result;
     }
 
     internal async ValueTask<(DnsDataReader reader, DnsMessageHeader header)> SendDnsQueryCoreAsync(IPEndPoint serverEndPoint, string name, QueryType queryType, CancellationToken cancellationToken)
@@ -177,44 +197,31 @@ public class Resolver : IDisposable
         }
     }
 
-    internal ValueTask<DnsCacheRecord> QueryAsync(string name, QueryType queryType, CancellationToken cancellationToken)
+    internal async ValueTask<DnsResponse> SendQueryAsync(string name, QueryType queryType, CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        cancellationToken.ThrowIfCancellationRequested();
+        (CancellationTokenSource cts, bool disposeTokenSource, CancellationTokenSource pendingRequestsCts) = PrepareCancellationTokenSource(cancellationToken);
 
-        if (_cache.TryGet(name, queryType, out var record))
+        try
         {
-            return ValueTask.FromResult(record);
+            return await SendQueryAsyncSlow(name, queryType, cts.Token);
         }
-
-        return QueryWithTimeoutAsync(name, queryType, cancellationToken);
-
-        async ValueTask<DnsCacheRecord> QueryWithTimeoutAsync(string name, QueryType queryType, CancellationToken cancellationToken)
+        catch (OperationCanceledException oce) when (
+            !cancellationToken.IsCancellationRequested && // not cancelled by the caller
+            !pendingRequestsCts.IsCancellationRequested) // not cancelled by the global token (dispose)
+                                                         // the only remaining token that could cancel this is the linked cts from the timeout.
         {
-            (CancellationTokenSource cts, bool disposeTokenSource, CancellationTokenSource pendingRequestsCts) = PrepareCancellationTokenSource(cancellationToken);
-
-            try
+            Debug.Assert(cts.Token.IsCancellationRequested);
+            throw new TimeoutException("The operation has timed out.", oce);
+        }
+        finally
+        {
+            if (disposeTokenSource)
             {
-                return await QueryAsyncSlow(name, queryType, cts.Token);
-            }
-            catch (OperationCanceledException oce) when (
-                !cancellationToken.IsCancellationRequested && // not cancelled by the caller
-                !pendingRequestsCts.IsCancellationRequested) // not cancelled by the global token (dispose)
-                                                             // the only remaining token that could cancel this is the linked cts from the timeout.
-            {
-                Debug.Assert(cts.Token.IsCancellationRequested);
-                throw new TimeoutException("The operation has timed out.", oce);
-            }
-            finally
-            {
-                if (disposeTokenSource)
-                {
-                    cts.Dispose();
-                }
+                cts.Dispose();
             }
         }
 
-        async ValueTask<DnsCacheRecord> QueryAsyncSlow(string name, QueryType queryType, CancellationToken cancellationToken)
+        async ValueTask<DnsResponse> SendQueryAsyncSlow(string name, QueryType queryType, CancellationToken cancellationToken)
         {
             DnsDataReader responseReader = default;
             DnsMessageHeader header = default;
@@ -251,8 +258,7 @@ public class Resolver : IDisposable
             List<DnsResourceRecord> authorities = ReadRecords(header.AuthorityCount, ref ttl, ref responseReader);
             List<DnsResourceRecord> additionals = ReadRecords(header.AdditionalRecordCount, ref ttl, ref responseReader);
 
-            DnsCacheRecord record = new(queryStartedTime, queryStartedTime.AddSeconds(ttl), answers, authorities, additionals);
-            _cache.TryAdd(name, queryType, record);
+            DnsResponse record = new(queryStartedTime, queryStartedTime.AddSeconds(ttl), answers, authorities, additionals);
             return record;
 
             static List<DnsResourceRecord> ReadRecords(int count, ref int ttl, ref DnsDataReader reader)
