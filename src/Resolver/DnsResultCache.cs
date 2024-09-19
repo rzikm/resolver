@@ -4,14 +4,16 @@ namespace Resolver;
 
 internal struct DnsResponse
 {
+    public DnsMessageHeader Header { get; }
     public List<DnsResourceRecord> Answers { get; }
     public List<DnsResourceRecord> Authorities { get; }
     public List<DnsResourceRecord> Additionals { get; }
     public DateTime CreatedAt { get; }
     public DateTime Expiration { get; }
 
-    public DnsResponse(DateTime createdAt, DateTime expiration, List<DnsResourceRecord> answers, List<DnsResourceRecord> authorities, List<DnsResourceRecord> additionals)
+    public DnsResponse(DnsMessageHeader header, DateTime createdAt, DateTime expiration, List<DnsResourceRecord> answers, List<DnsResourceRecord> authorities, List<DnsResourceRecord> additionals)
     {
+        Header = header;
         CreatedAt = createdAt;
         Expiration = expiration;
         Answers = answers;
@@ -66,28 +68,42 @@ internal class DnsResultCache
     private readonly TimeProvider _timeProvider;
 
     private readonly ConcurrentDictionary<DnsCacheKey, DnsCacheRecord> _cache = new();
+    private readonly ConcurrentDictionary<string, DateTime> _negativeCache = new();
 
     public DnsResultCache(TimeProvider timeProvider)
     {
         _timeProvider = timeProvider;
     }
 
-    public bool TryGet(string name, QueryType type, out DnsCacheRecord record)
+    public bool TryGet<T>(string name, QueryType type, out T[] result)
     {
-        var key = new DnsCacheKey(name, type);
-        if (_cache.TryGetValue(key, out var r) && r.Expiration > _timeProvider.GetUtcNow().DateTime)
+        if (_negativeCache.TryGetValue(name, out var expiration) && expiration > _timeProvider.GetUtcNow().DateTime)
         {
-            record = r;
+            result = Array.Empty<T>();
             return true;
         }
 
-        record = default;
+        var key = new DnsCacheKey(name, type);
+        if (_cache.TryGetValue(key, out var r) && r.Expiration > _timeProvider.GetUtcNow().DateTime)
+        {
+            result = (T[])r.Result;
+            return true;
+        }
+
+        result = default;
         return false;
     }
 
-    public bool TryAdd(string name, QueryType type, DnsCacheRecord record)
+    public bool TryAdd<T>(string name, QueryType type, DateTime expiration, T[] result)
     {
+        DnsCacheRecord record = new DnsCacheRecord(_timeProvider.GetUtcNow().DateTime, expiration, result);
         _cache.AddOrUpdate(new DnsCacheKey(name, type), record, (_, _) => record);
+        return true;
+    }
+
+    public bool TryAddNonexistent(string name, DateTime expiration)
+    {
+        _negativeCache.AddOrUpdate(name, expiration, (_, _) => expiration);
         return true;
     }
 }

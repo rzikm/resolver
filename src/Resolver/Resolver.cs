@@ -3,9 +3,6 @@ using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
-using System.Reflection.Metadata.Ecma335;
-using System.Runtime.InteropServices;
-using System.Text;
 
 namespace Resolver;
 
@@ -72,12 +69,16 @@ public class Resolver : IDisposable
         cancellationToken.ThrowIfCancellationRequested();
 
         var queryType = QueryType.SRV;
-        if (_cache.TryGet(name, queryType, out DnsCacheRecord cached))
+        if (_cache.TryGet(name, queryType, out ServiceResult[] cached))
         {
-            return (ServiceResult[])cached.Result;
+            return cached;
         }
 
         DnsResponse record = await SendQueryAsync(name, QueryType.SRV, cancellationToken);
+        if (!ValidateResponse(name, record))
+        {
+            return Array.Empty<ServiceResult>();
+        }
 
         var results = new List<ServiceResult>(record.Answers.Count);
 
@@ -102,7 +103,7 @@ public class Resolver : IDisposable
         }
 
         var result = results.ToArray();
-        _cache.TryAdd(name, queryType, new DnsCacheRecord(record.CreatedAt, record.Expiration, result));
+        _cache.TryAdd(name, queryType, record.Expiration, result);
         return result;
     }
 
@@ -116,13 +117,22 @@ public class Resolver : IDisposable
             throw new ArgumentOutOfRangeException(nameof(addressFamily), addressFamily, "Invalid address family");
         }
 
-        var queryType = addressFamily == AddressFamily.InterNetwork ? QueryType.A : QueryType.AAAA;
-        if (_cache.TryGet(name, queryType, out DnsCacheRecord cached))
+        if (name.Length > MaximumNameLength)
         {
-            return (AddressResult[])cached.Result;
+            throw new ArgumentException("Name is too long", nameof(name));
+        }
+
+        var queryType = addressFamily == AddressFamily.InterNetwork ? QueryType.A : QueryType.AAAA;
+        if (_cache.TryGet(name, queryType, out AddressResult[] cached))
+        {
+            return cached;
         }
 
         DnsResponse record = await SendQueryAsync(name, queryType, cancellationToken);
+        if (!ValidateResponse(name, record))
+        {
+            return Array.Empty<AddressResult>();
+        }
 
         var results = new List<AddressResult>(record.Answers.Count);
 
@@ -151,8 +161,48 @@ public class Resolver : IDisposable
         }
 
         var result = results.ToArray();
-        _cache.TryAdd(name, queryType, new DnsCacheRecord(record.CreatedAt, record.Expiration, result));
+        _cache.TryAdd(name, queryType, record.Expiration, result);
         return result;
+    }
+
+    internal bool ValidateResponse(string name, in DnsResponse response)
+    {
+        if (response.Header.ResponseCode == QueryResponseCode.NoError)
+        {
+            return true;
+        }
+
+        if (response.Header.ResponseCode == QueryResponseCode.NameError)
+        {
+            //
+            // RFC 2308 Section 5 - Caching Negative Answers
+            //
+            //    Like normal answers negative answers have a time to live (TTL).  As
+            //    there is no record in the answer section to which this TTL can be
+            //    applied, the TTL must be carried by another method.  This is done by
+            //    including the SOA record from the zone in the authority section of
+            //    the reply.  When the authoritative server creates this record its TTL
+            //    is taken from the minimum of the SOA.MINIMUM field and SOA's TTL.
+            //    This TTL decrements in a similar manner to a normal cached answer and
+            //    upon reaching zero (0) indicates the cached negative answer MUST NOT
+            //    be used again.
+            //
+
+            DnsResourceRecord? soa = response.Authorities.FirstOrDefault(r => r.Type == QueryType.SOA);
+            if (soa != null && DnsPrimitives.TryReadSoa(soa.Value.Data.Span, out string? mname, out string? rname, out uint serial, out uint refresh, out uint retry, out uint expire, out uint minimum, out _))
+            {
+                //    A negative answer that resulted from a name error (NXDOMAIN) should
+                //    be cached such that it can be retrieved and returned in response to
+                //    another query for the same <QNAME, QCLASS> that resulted in the
+                //    cached negative response.
+                DateTime expiration = response.CreatedAt.AddSeconds(Math.Min(minimum, soa.Value.Ttl));
+                _cache.TryAddNonexistent(name, expiration);
+            }
+
+            return false;
+        }
+
+        return true;
     }
 
     internal async ValueTask<(DnsDataReader reader, DnsMessageHeader header)> SendDnsQueryCoreTcpAsync(IPEndPoint serverEndPoint, string name, QueryType queryType, CancellationToken cancellationToken)
@@ -235,7 +285,7 @@ public class Resolver : IDisposable
                     continue;
                 }
 
-                responseReader = new DnsDataReader(memory, buffer);
+                responseReader = new DnsDataReader(memory.Slice(0, readLength), buffer);
                 if (!responseReader.TryReadHeader(out header) ||
                     header.TransactionId != transactionId ||
                     !header.IsResponse)
@@ -310,6 +360,7 @@ public class Resolver : IDisposable
                     // return default;
                 }
 
+                // TODO: on which response codes should we retry?
                 if (header.ResponseCode == QueryResponseCode.NoError)
                 {
                     break;
@@ -318,18 +369,12 @@ public class Resolver : IDisposable
                 responseReader.Dispose();
             }
 
-            if (header.ResponseCode != QueryResponseCode.NoError)
-            {
-                // TODO: all servers failed, cache the failure
-                throw new Exception("Invalid response: Query failed");
-            }
-
             int ttl = int.MaxValue;
             List<DnsResourceRecord> answers = ReadRecords(header.AnswerCount, ref ttl, ref responseReader);
             List<DnsResourceRecord> authorities = ReadRecords(header.AuthorityCount, ref ttl, ref responseReader);
             List<DnsResourceRecord> additionals = ReadRecords(header.AdditionalRecordCount, ref ttl, ref responseReader);
 
-            DnsResponse record = new(queryStartedTime, queryStartedTime.AddSeconds(ttl), answers, authorities, additionals);
+            DnsResponse record = new(header, queryStartedTime, queryStartedTime.AddSeconds(ttl), answers, authorities, additionals);
             responseReader.Dispose();
 
             return record;
@@ -347,6 +392,7 @@ public class Resolver : IDisposable
                     }
 
                     ttl = Math.Min(ttl, record.Ttl);
+                    // copy the data to a new array since the underlying array is pooled
                     records.Add(new DnsResourceRecord(record.Name, record.Type, record.Class, record.Ttl, record.Data.ToArray()));
                 }
 

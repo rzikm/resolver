@@ -9,6 +9,37 @@ public class ResolveAddressesTests : LoopbackDnsTestBase
     {
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ResolveIPv4_NoSuchName_Success(bool includeSoa)
+    {
+        _ = DnsServer.ProcessUdpRequest(builder =>
+        {
+            builder.ResponseCode = QueryResponseCode.NameError;
+            if (includeSoa)
+            {
+                builder.Authorities.AddStartOfAuthority("ns.com", 240, "ns.com", "admin.ns.com", 1, 900, 180, 6048000, 3600);
+            }
+            return Task.CompletedTask;
+        });
+
+        AddressResult[] results = await Resolver.ResolveIPAddressesAsync("www.example.com", AddressFamily.InterNetwork);
+        Assert.Empty(results);
+
+        if (includeSoa)
+        {
+            // if SOA is included, the negative result can be cached
+            Assert.Empty(await Resolver.ResolveIPAddressesAsync("www.example.com", AddressFamily.InterNetwork));
+        }
+        else
+        {
+            Resolver.Timeout = TimeSpan.FromSeconds(1);
+            // no caching -> new request, and the request should timeout
+            await Assert.ThrowsAsync<TimeoutException>(async () => await Resolver.ResolveIPAddressesAsync("www.example.com", AddressFamily.InterNetwork));
+        }
+    }
+
     [Fact]
     public async Task ResolveIPv4_Simple_Success()
     {

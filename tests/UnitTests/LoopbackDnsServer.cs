@@ -197,10 +197,22 @@ internal static class LoopbackDnsServerExtensions
         byte[] buff = new byte[256];
         if (!DnsPrimitives.TryWriteService(buff, priority, weight, port, target, out int length))
         {
-            throw new InvalidOperationException("Failed to encode domain name");
+            throw new InvalidOperationException("Failed to encode SRV record");
         }
 
         records.Add(new DnsResourceRecord(name, QueryType.SRV, QueryClass.Internet, ttl, buff.AsMemory(0, length)));
+        return records;
+    }
+
+    public static List<DnsResourceRecord> AddStartOfAuthority(this List<DnsResourceRecord> records, string name, int ttl, string mname, string rname, uint serial, uint refresh, uint retry, uint expire, uint minimum)
+    {
+        byte[] buff = new byte[256];
+        if (!DnsPrimitives.TryWriteSoa(buff, mname, rname, serial, refresh, retry, expire, minimum, out int length))
+        {
+            throw new InvalidOperationException("Failed to encode SOA record");
+        }
+
+        records.Add(new DnsResourceRecord(name, QueryType.SOA, QueryClass.Internet, ttl, buff.AsMemory(0, length)));
         return records;
     }
 }

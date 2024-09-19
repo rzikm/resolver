@@ -21,6 +21,11 @@ internal enum QueryType
     CNAME = 5,
 
     /// <summary>
+    /// Marks the start of a zone of authority.
+    /// </summary>
+    SOA = 6,
+
+    /// <summary>
     /// Mail exchange.
     /// </summary>
     MX = 15,

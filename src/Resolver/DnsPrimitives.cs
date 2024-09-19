@@ -71,7 +71,7 @@ internal static class DnsPrimitives
         // infinite loops
         //
 
-        bytesRead = 1;
+        bytesRead = 0;
 
         if (offset < 0 || offset >= messageBuffer.Length)
         {
@@ -116,6 +116,7 @@ internal static class DnsPrimitives
                 // pointer, together with next byte gives the offset of the true label
                 if (currentOffset + 1 < messageBuffer.Length)
                 {
+                    bytesRead += 2;
                     int pointer = ((length & 0x3F) << 8) | messageBuffer[currentOffset + 1];
 
                     // we prohibit self-references and forward pointers to avoid
@@ -191,6 +192,49 @@ internal static class DnsPrimitives
         }
 
         bytesWritten += 6;
+        return true;
+    }
+
+    internal static bool TryWriteSoa(Span<byte> buffer, string primaryNameServer, string responsibleMailAddress, uint serial, uint refresh, uint retry, uint expire, uint minimum, out int bytesWritten)
+    {
+        if (!TryWriteQName(buffer, primaryNameServer, out int w1) ||
+            !TryWriteQName(buffer.Slice(w1), responsibleMailAddress, out int w2) ||
+            !BinaryPrimitives.TryWriteUInt32BigEndian(buffer.Slice(w1 + w2), serial) ||
+            !BinaryPrimitives.TryWriteUInt32BigEndian(buffer.Slice(w1 + w2 + 4), refresh) ||
+            !BinaryPrimitives.TryWriteUInt32BigEndian(buffer.Slice(w1 + w2 + 8), retry) ||
+            !BinaryPrimitives.TryWriteUInt32BigEndian(buffer.Slice(w1 + w2 + 12), expire) ||
+            !BinaryPrimitives.TryWriteUInt32BigEndian(buffer.Slice(w1 + w2 + 16), minimum))
+        {
+            bytesWritten = 0;
+            return false;
+        }
+
+        bytesWritten = w1 + w2 + 20;
+        return true;
+    }
+
+    internal static bool TryReadSoa(ReadOnlySpan<byte> buffer, [NotNullWhen(true)] out string? primaryNameServer, [NotNullWhen(true)] out string? responsibleMailAddress, out uint serial, out uint refresh, out uint retry, out uint expire, out uint minimum, out int bytesRead)
+    {
+        if (!TryReadQName(buffer, 0, out primaryNameServer, out int w1) ||
+            !TryReadQName(buffer.Slice(w1), 0, out responsibleMailAddress, out int w2) ||
+            !BinaryPrimitives.TryReadUInt32BigEndian(buffer.Slice(w1 + w2), out serial) ||
+            !BinaryPrimitives.TryReadUInt32BigEndian(buffer.Slice(w1 + w2 + 4), out refresh) ||
+            !BinaryPrimitives.TryReadUInt32BigEndian(buffer.Slice(w1 + w2 + 8), out retry) ||
+            !BinaryPrimitives.TryReadUInt32BigEndian(buffer.Slice(w1 + w2 + 12), out expire) ||
+            !BinaryPrimitives.TryReadUInt32BigEndian(buffer.Slice(w1 + w2 + 16), out minimum))
+        {
+            primaryNameServer = null!;
+            responsibleMailAddress = null!;
+            serial = 0;
+            refresh = 0;
+            retry = 0;
+            expire = 0;
+            minimum = 0;
+            bytesRead = 0;
+            return false;
+        }
+
+        bytesRead = w1 + w2 + 20;
         return true;
     }
 }

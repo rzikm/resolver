@@ -74,7 +74,7 @@ public class DnsPrimitivesTests
 
         Assert.True(DnsPrimitives.TryReadQName(data, data.Length - 6, out string? actual, out int bytesRead));
         Assert.Equal("www.example.com", actual);
-        Assert.Equal(5, bytesRead);
+        Assert.Equal(6, bytesRead);
     }
 
     [Fact]
