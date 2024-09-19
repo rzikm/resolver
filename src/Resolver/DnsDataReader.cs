@@ -1,18 +1,22 @@
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.InteropServices;
+using System.Threading.Channels;
 
 namespace Resolver;
 
-internal struct DnsDataReader
+internal struct DnsDataReader : IDisposable
 {
     private ReadOnlyMemory<byte> _buffer;
+    private byte[]? _pooled;
     private int _position;
 
-    public DnsDataReader(ReadOnlyMemory<byte> buffer)
+    public DnsDataReader(ReadOnlyMemory<byte> buffer, byte[]? returnToPool = null)
     {
         _buffer = buffer;
         _position = 0;
+        _pooled = returnToPool;
     }
 
     public bool TryReadHeader(out DnsMessageHeader header)
@@ -100,5 +104,14 @@ internal struct DnsDataReader
         }
 
         return false;
+    }
+
+    public void Dispose()
+    {
+        if (_pooled is not null)
+        {
+            ArrayPool<byte>.Shared.Return(_pooled);
+            _pooled = null!;
+        }
     }
 }

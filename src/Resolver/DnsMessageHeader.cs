@@ -51,7 +51,7 @@ internal struct DnsMessageHeader
         set => _flags = ReverseByteOrder((ushort)value);
     }
 
-    internal bool RecursionDesired
+    internal bool IsRecursionDesired
     {
         get => (QueryFlags & QueryFlags.RecursionDesired) != 0;
         set
@@ -69,11 +69,11 @@ internal struct DnsMessageHeader
 
     internal QueryResponseCode ResponseCode
     {
-        get => (QueryResponseCode)(_flags & 0xF);
-        set => _flags = (ushort)((_flags & 0xFFF0) | (ushort)value);
+        get => (QueryResponseCode)((_flags & 0x0F00) >> 8);
+        set => _flags = (ushort)((_flags & 0xF0FF) | ((ushort)value << 8));
     }
 
-    internal bool ResultTruncated => (QueryFlags & QueryFlags.ResultTruncated) != 0;
+    internal bool IsResultTruncated => (QueryFlags & QueryFlags.ResultTruncated) != 0;
 
     internal bool IsResponse
     {
@@ -95,7 +95,7 @@ internal struct DnsMessageHeader
     {
         this = default;
         TransactionId = (ushort)Random.Shared.Next(ushort.MaxValue);
-        RecursionDesired = true;
+        IsRecursionDesired = true;
         QueryCount = 1;
     }
 

@@ -53,4 +53,25 @@ public class DnsResultCacheTests
         TimeProvider.Advance(TimeSpan.FromSeconds(3601));
         Assert.False(Cache.TryGet(name, QueryType.A, out _));
     }
+
+    [Fact]
+    public void TryAdd_Overwrite_Expired()
+    {
+        string name = "www.example.com";
+
+        string result = "result";
+        DnsCacheRecord cacheRecord = new DnsCacheRecord(TimeProvider.GetUtcNow().DateTime, TimeProvider.GetUtcNow().DateTime.AddSeconds(3600), result);
+        Assert.True(Cache.TryAdd(name, QueryType.A, cacheRecord));
+        Assert.True(Cache.TryGet(name, QueryType.A, out _));
+
+        TimeProvider.Advance(TimeSpan.FromSeconds(3601));
+
+        string result2 = "result2";
+        DnsCacheRecord cacheRecord2 = new DnsCacheRecord(TimeProvider.GetUtcNow().DateTime, TimeProvider.GetUtcNow().DateTime.AddSeconds(3600), result2);
+        Assert.True(Cache.TryAdd(name, QueryType.A, cacheRecord2));
+        Assert.True(Cache.TryGet(name, QueryType.A, out DnsCacheRecord outRecord));
+
+        Assert.Equal(cacheRecord2.Expiration, outRecord.Expiration);
+        Assert.Equal(cacheRecord2.Result, outRecord.Result);
+    }
 }

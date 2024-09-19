@@ -15,7 +15,6 @@ public class Resolver : IDisposable
     private const int IPv4Length = 4;
     private const int IPv6Length = 16;
     private const int HeaderSize = 12;
-    private const int RecordHeaderLength = 10;
 
     private static readonly TimeSpan s_maxTimeout = TimeSpan.FromMilliseconds(int.MaxValue);
 
@@ -156,44 +155,107 @@ public class Resolver : IDisposable
         return result;
     }
 
-    internal async ValueTask<(DnsDataReader reader, DnsMessageHeader header)> SendDnsQueryCoreAsync(IPEndPoint serverEndPoint, string name, QueryType queryType, CancellationToken cancellationToken)
+    internal async ValueTask<(DnsDataReader reader, DnsMessageHeader header)> SendDnsQueryCoreTcpAsync(IPEndPoint serverEndPoint, string name, QueryType queryType, CancellationToken cancellationToken)
     {
-        var buffer = new byte[512];
-        Memory<byte> memory = buffer;
-        (ushort transactionId, int length) = EncodeQuestion(memory, name, queryType);
-
-        using var socket = new Socket(serverEndPoint.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
-        await socket.ConnectAsync(serverEndPoint, cancellationToken);
-
-        await socket.SendAsync(memory.Slice(0, length), SocketFlags.None, cancellationToken);
-
-        DnsDataReader responseReader;
-        DnsMessageHeader header;
-
-        while (true)
+        var buffer = ArrayPool<byte>.Shared.Rent(8 * 1024);
+        try
         {
-            int readLength = await socket.ReceiveAsync(memory, SocketFlags.None, cancellationToken);
+            // When sending over TCP, the message is prefixed by 2B length
+            (ushort transactionId, int length) = EncodeQuestion(buffer.AsMemory(2), name, queryType);
+            BinaryPrimitives.WriteUInt16BigEndian(buffer, (ushort)length);
 
-            if (readLength < HeaderSize)
+            using var socket = new Socket(serverEndPoint.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
+            await socket.ConnectAsync(serverEndPoint, cancellationToken);
+            await socket.SendAsync(buffer.AsMemory(0, length + 2), SocketFlags.None, cancellationToken);
+
+            int responseLength = -1;
+            int bytesRead = 0;
+            while (responseLength < 0 || bytesRead < length + 2)
             {
-                continue;
+                int read = await socket.ReceiveAsync(buffer.AsMemory(bytesRead), SocketFlags.None);
+                bytesRead += read;
+
+                if (responseLength < 0 && bytesRead >= 2)
+                {
+                    responseLength = BinaryPrimitives.ReadUInt16BigEndian(buffer.AsSpan(0, 2));
+
+                    if (responseLength > buffer.Length)
+                    {
+                        var largerBuffer = ArrayPool<byte>.Shared.Rent(responseLength);
+                        Array.Copy(buffer, largerBuffer, bytesRead);
+                        ArrayPool<byte>.Shared.Return(buffer);
+                        buffer = largerBuffer;
+                    }
+                }
             }
 
-            responseReader = new DnsDataReader(memory);
-            if (!responseReader.TryReadHeader(out header) ||
+            DnsDataReader responseReader = new DnsDataReader(buffer.AsMemory(2, responseLength), buffer);
+            if (!responseReader.TryReadHeader(out DnsMessageHeader header) ||
                 header.TransactionId != transactionId ||
                 !header.IsResponse)
             {
-                continue;
+                throw new Exception("Invalid response: Header mismatch");
             }
 
-            if (header.ResultTruncated)
-            {
-                // TODO: TCP fallback
-                throw new Exception("Invalid response: Truncated response");
-            }
-
+            buffer = null!;
             return (responseReader, header);
+        }
+        finally
+        {
+            if (buffer != null)
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+        }
+    }
+
+    internal async ValueTask<(DnsDataReader reader, DnsMessageHeader header)> SendDnsQueryCoreUdpAsync(IPEndPoint serverEndPoint, string name, QueryType queryType, CancellationToken cancellationToken)
+    {
+        var buffer = ArrayPool<byte>.Shared.Rent(512);
+        try
+        {
+
+            Memory<byte> memory = buffer;
+            (ushort transactionId, int length) = EncodeQuestion(memory, name, queryType);
+
+            using var socket = new Socket(serverEndPoint.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
+            await socket.ConnectAsync(serverEndPoint, cancellationToken);
+
+            await socket.SendAsync(memory.Slice(0, length), SocketFlags.None, cancellationToken);
+
+            DnsDataReader responseReader;
+            DnsMessageHeader header;
+
+            while (true)
+            {
+                int readLength = await socket.ReceiveAsync(memory, SocketFlags.None, cancellationToken);
+
+                if (readLength < HeaderSize)
+                {
+                    continue;
+                }
+
+                responseReader = new DnsDataReader(memory, buffer);
+                if (!responseReader.TryReadHeader(out header) ||
+                    header.TransactionId != transactionId ||
+                    !header.IsResponse)
+                {
+                    // the message is not a response for our query.
+                    // don't dispose reader, we will reuse the buffer
+                    continue;
+                }
+
+                // ownership of the buffer is transferred to the reader, caller will dispose.
+                buffer = null!;
+                return (responseReader, header);
+            }
+        }
+        finally
+        {
+            if (buffer != null)
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
         }
     }
 
@@ -230,7 +292,14 @@ public class Resolver : IDisposable
             foreach (IPEndPoint serverEndPoint in _options.Servers)
             {
                 queryStartedTime = _timeProvider.GetUtcNow().DateTime;
-                (responseReader, header) = await SendDnsQueryCoreAsync(serverEndPoint, name, queryType, cancellationToken);
+                (responseReader, header) = await SendDnsQueryCoreUdpAsync(serverEndPoint, name, queryType, cancellationToken);
+
+                if (header.IsResultTruncated)
+                {
+                    responseReader.Dispose();
+                    // TCP fallback
+                    (responseReader, header) = await SendDnsQueryCoreTcpAsync(serverEndPoint, name, queryType, cancellationToken);
+                }
 
                 if (header.QueryCount != 1 ||
                     !responseReader.TryReadQuestion(out var qName, out var qType, out var qClass) ||
@@ -245,6 +314,8 @@ public class Resolver : IDisposable
                 {
                     break;
                 }
+
+                responseReader.Dispose();
             }
 
             if (header.ResponseCode != QueryResponseCode.NoError)
@@ -259,6 +330,8 @@ public class Resolver : IDisposable
             List<DnsResourceRecord> additionals = ReadRecords(header.AdditionalRecordCount, ref ttl, ref responseReader);
 
             DnsResponse record = new(queryStartedTime, queryStartedTime.AddSeconds(ttl), answers, authorities, additionals);
+            responseReader.Dispose();
+
             return record;
 
             static List<DnsResourceRecord> ReadRecords(int count, ref int ttl, ref DnsDataReader reader)

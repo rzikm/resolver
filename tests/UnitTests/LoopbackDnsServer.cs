@@ -1,3 +1,5 @@
+using System.Buffers;
+using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
 
@@ -26,28 +28,24 @@ internal class LoopbackDnsServer : IDisposable
         _tcpSocket.Dispose();
     }
 
-    public async Task ProcessUdpRequest(Func<LoopbackDnsResponseBuilder, Task> action)
+    public async Task<int> ProcessRequestCore(ReadOnlyMemory<byte> message, Func<LoopbackDnsResponseBuilder, Task> action, Memory<byte> responseBuffer)
     {
-        byte[] buffer = new byte[512];
-        EndPoint remoteEndPoint = new IPEndPoint(IPAddress.Any, 0);
-        SocketReceiveFromResult result = await _dnsSocket.ReceiveFromAsync(buffer, remoteEndPoint);
-
-        DnsDataReader reader = new DnsDataReader(buffer.AsMemory(0, result.ReceivedBytes));
+        DnsDataReader reader = new DnsDataReader(message);
 
         if (!reader.TryReadHeader(out DnsMessageHeader header) ||
             !reader.TryReadQuestion(out var name, out var type, out var @class))
         {
-            return;
+            return 0;
         }
 
-        LoopbackDnsResponseBuilder responseBuilder = new((IPEndPoint)result.RemoteEndPoint!, name, type, @class);
+        LoopbackDnsResponseBuilder responseBuilder = new(name, type, @class);
         responseBuilder.TransactionId = header.TransactionId;
         responseBuilder.Flags = header.QueryFlags | QueryFlags.HasResponse;
         responseBuilder.ResponseCode = QueryResponseCode.NoError;
 
         await action(responseBuilder);
 
-        DnsDataWriter writer = new(new Memory<byte>(buffer));
+        DnsDataWriter writer = new(responseBuffer);
         if (!writer.TryWriteHeader(new DnsMessageHeader
         {
             TransactionId = responseBuilder.TransactionId,
@@ -94,22 +92,70 @@ internal class LoopbackDnsServer : IDisposable
             }
         }
 
-        await _dnsSocket.SendToAsync(buffer.AsMemory(0, writer.Position), SocketFlags.None, result.RemoteEndPoint);
+        return writer.Position;
+    }
+
+    public async Task ProcessUdpRequest(Func<LoopbackDnsResponseBuilder, Task> action)
+    {
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(512);
+        try
+        {
+            EndPoint remoteEndPoint = new IPEndPoint(IPAddress.Any, 0);
+            SocketReceiveFromResult result = await _dnsSocket.ReceiveFromAsync(buffer, remoteEndPoint);
+
+            int bytesWritten = await ProcessRequestCore(buffer.AsMemory(0, result.ReceivedBytes), action, buffer.AsMemory(0, 512));
+
+            await _dnsSocket.SendToAsync(buffer.AsMemory(0, bytesWritten), SocketFlags.None, result.RemoteEndPoint);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    public async Task ProcessTcpRequest(Func<LoopbackDnsResponseBuilder, Task> action)
+    {
+        using Socket tcpClient = await _tcpSocket.AcceptAsync();
+
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(8 * 1024);
+        try
+        {
+            EndPoint remoteEndPoint = new IPEndPoint(IPAddress.Any, 0);
+
+            int bytesRead = 0;
+            int length = -1;
+            while (length < 0 || bytesRead < length + 2)
+            {
+                int toRead = length < 0 ? 2 : length + 2 - bytesRead;
+                int read = await tcpClient.ReceiveAsync(buffer.AsMemory(bytesRead, toRead), SocketFlags.None);
+                bytesRead += read;
+
+                if (length < 0 && bytesRead >= 2)
+                {
+                    length = BinaryPrimitives.ReadUInt16BigEndian(buffer.AsSpan(0, 2));
+                }
+            }
+
+            int bytesWritten = await ProcessRequestCore(buffer.AsMemory(2, length), action, buffer.AsMemory(2));
+            BinaryPrimitives.WriteUInt16BigEndian(buffer.AsSpan(0, 2), (ushort)bytesWritten);
+            await tcpClient.SendAsync(buffer.AsMemory(0, bytesWritten + 2), SocketFlags.None);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
     }
 }
 
 internal class LoopbackDnsResponseBuilder
 {
-    public LoopbackDnsResponseBuilder(IPEndPoint remoteEndPoint, string name, QueryType type, QueryClass @class)
+    public LoopbackDnsResponseBuilder(string name, QueryType type, QueryClass @class)
     {
-        RemoteEndPoint = remoteEndPoint;
         Name = name;
         Type = type;
         Class = @class;
         Questions.Add((name, type, @class));
     }
-
-    public IPEndPoint RemoteEndPoint { get; }
 
     public ushort TransactionId { get; set; }
     public QueryFlags Flags { get; set; }
