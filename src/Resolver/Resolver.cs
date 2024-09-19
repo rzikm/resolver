@@ -75,7 +75,7 @@ public class Resolver : IDisposable
         }
 
         DnsResponse record = await SendQueryAsync(name, QueryType.SRV, cancellationToken);
-        if (!ValidateResponse(name, record))
+        if (!ValidateResponse<ServiceResult>(name, QueryType.SRV, record))
         {
             return Array.Empty<ServiceResult>();
         }
@@ -129,7 +129,7 @@ public class Resolver : IDisposable
         }
 
         DnsResponse record = await SendQueryAsync(name, queryType, cancellationToken);
-        if (!ValidateResponse(name, record))
+        if (!ValidateResponse<AddressResult>(name, queryType, record))
         {
             return Array.Empty<AddressResult>();
         }
@@ -165,11 +165,61 @@ public class Resolver : IDisposable
         return result;
     }
 
-    internal bool ValidateResponse(string name, in DnsResponse response)
+    internal bool GetNegativeCacheExpiration(in DnsResponse response, out DateTime expiration)
+    {
+        //
+        // RFC 2308 Section 5 - Caching Negative Answers
+        //
+        //    Like normal answers negative answers have a time to live (TTL).  As
+        //    there is no record in the answer section to which this TTL can be
+        //    applied, the TTL must be carried by another method.  This is done by
+        //    including the SOA record from the zone in the authority section of
+        //    the reply.  When the authoritative server creates this record its TTL
+        //    is taken from the minimum of the SOA.MINIMUM field and SOA's TTL.
+        //    This TTL decrements in a similar manner to a normal cached answer and
+        //    upon reaching zero (0) indicates the cached negative answer MUST NOT
+        //    be used again.
+        //
+
+        DnsResourceRecord? soa = response.Authorities.FirstOrDefault(r => r.Type == QueryType.SOA);
+        if (soa != null && DnsPrimitives.TryReadSoa(soa.Value.Data.Span, out string? mname, out string? rname, out uint serial, out uint refresh, out uint retry, out uint expire, out uint minimum, out _))
+        {
+            expiration = response.CreatedAt.AddSeconds(Math.Min(minimum, soa.Value.Ttl));
+            return true;
+        }
+
+        expiration = default;
+        return false;
+    }
+
+    internal bool ValidateResponse<T>(string name, QueryType queryType, in DnsResponse response)
     {
         if (response.Header.ResponseCode == QueryResponseCode.NoError)
         {
-            return true;
+            if (response.Answers.Count > 0)
+            {
+                return true;
+            }
+            //
+            // RFC 2308 Section 2.2 - No Data
+            //
+            //    NODATA is indicated by an answer with the RCODE set to NOERROR and no
+            //    relevant answers in the answer section.  The authority section will
+            //    contain an SOA record, or there will be no NS records there.
+            //
+            //
+            // RFC 2308 Section 5 - Caching Negative Answers
+            //
+            //    A negative answer that resulted from a no data error (NODATA) should
+            //    be cached such that it can be retrieved and returned in response to
+            //    another query for the same <QNAME, QTYPE, QCLASS> that resulted in
+            //    the cached negative response.
+            //
+            if (!response.Authorities.Any(r => r.Type == QueryType.NS) && GetNegativeCacheExpiration(response, out DateTime expiration))
+            {
+                _cache.TryAdd(name, queryType, expiration, Array.Empty<T>());
+            }
+            return false;
         }
 
         if (response.Header.ResponseCode == QueryResponseCode.NameError)
@@ -177,25 +227,13 @@ public class Resolver : IDisposable
             //
             // RFC 2308 Section 5 - Caching Negative Answers
             //
-            //    Like normal answers negative answers have a time to live (TTL).  As
-            //    there is no record in the answer section to which this TTL can be
-            //    applied, the TTL must be carried by another method.  This is done by
-            //    including the SOA record from the zone in the authority section of
-            //    the reply.  When the authoritative server creates this record its TTL
-            //    is taken from the minimum of the SOA.MINIMUM field and SOA's TTL.
-            //    This TTL decrements in a similar manner to a normal cached answer and
-            //    upon reaching zero (0) indicates the cached negative answer MUST NOT
-            //    be used again.
+            //    A negative answer that resulted from a name error (NXDOMAIN) should
+            //    be cached such that it can be retrieved and returned in response to
+            //    another query for the same <QNAME, QCLASS> that resulted in the
+            //    cached negative response.
             //
-
-            DnsResourceRecord? soa = response.Authorities.FirstOrDefault(r => r.Type == QueryType.SOA);
-            if (soa != null && DnsPrimitives.TryReadSoa(soa.Value.Data.Span, out string? mname, out string? rname, out uint serial, out uint refresh, out uint retry, out uint expire, out uint minimum, out _))
+            if (GetNegativeCacheExpiration(response, out DateTime expiration))
             {
-                //    A negative answer that resulted from a name error (NXDOMAIN) should
-                //    be cached such that it can be retrieved and returned in response to
-                //    another query for the same <QNAME, QCLASS> that resulted in the
-                //    cached negative response.
-                DateTime expiration = response.CreatedAt.AddSeconds(Math.Min(minimum, soa.Value.Ttl));
                 _cache.TryAddNonexistent(name, expiration);
             }
 

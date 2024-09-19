@@ -12,6 +12,41 @@ public class ResolveAddressesTests : LoopbackDnsTestBase
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task ResolveIPv4_NoData_Success(bool includeSoa)
+    {
+        Resolver.Timeout = TimeSpan.FromSeconds(1);
+
+        _ = DnsServer.ProcessUdpRequest(builder =>
+        {
+            if (includeSoa)
+            {
+                builder.Authorities.AddStartOfAuthority("ns.com", 240, "ns.com", "admin.ns.com", 1, 900, 180, 6048000, 3600);
+            }
+            return Task.CompletedTask;
+        });
+
+        AddressResult[] results = await Resolver.ResolveIPAddressesAsync("www.example.com", AddressFamily.InterNetwork);
+        Assert.Empty(results);
+
+        if (includeSoa)
+        {
+            // if SOA is included, the negative result can be cached
+            Assert.Empty(await Resolver.ResolveIPAddressesAsync("www.example.com", AddressFamily.InterNetwork));
+
+            // negative result does not affect other types
+            await Assert.ThrowsAsync<TimeoutException>(async () => await Resolver.ResolveIPAddressesAsync("www.example.com", AddressFamily.InterNetworkV6));
+        }
+        else
+        {
+            // no caching -> new request, and the request should timeout
+            await Assert.ThrowsAsync<TimeoutException>(async () => await Resolver.ResolveIPAddressesAsync("www.example.com", AddressFamily.InterNetwork));
+        }
+    }
+
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task ResolveIPv4_NoSuchName_Success(bool includeSoa)
     {
         _ = DnsServer.ProcessUdpRequest(builder =>
@@ -29,8 +64,9 @@ public class ResolveAddressesTests : LoopbackDnsTestBase
 
         if (includeSoa)
         {
-            // if SOA is included, the negative result can be cached
+            // if SOA is included, the negative result can be cached for all types
             Assert.Empty(await Resolver.ResolveIPAddressesAsync("www.example.com", AddressFamily.InterNetwork));
+            Assert.Empty(await Resolver.ResolveIPAddressesAsync("www.example.com", AddressFamily.InterNetworkV6));
         }
         else
         {
