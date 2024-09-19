@@ -17,7 +17,7 @@ LookupClient client = new LookupClient();
 //     }
 // }
 
-Resolver resolver = new Resolver();
+Resolver.Resolver resolver = new();
 resolver.Timeout = TimeSpan.FromSeconds(5);
 
 var names = File.ReadAllLines("names.txt").Select(x =>
@@ -26,7 +26,7 @@ var names = File.ReadAllLines("names.txt").Select(x =>
     return (int.Parse(parts[0]), parts[1]);
 });
 
-// names = [names.ElementAt(8244)];
+names = [names.ElementAt(58)];
 
 Channel<Task<Result>> results = Channel.CreateUnbounded<Task<Result>>();
 
@@ -120,9 +120,10 @@ var writerTask = Task.Run(async () =>
             {
                 try
                 {
-                    var v4task = resolver.ResolveIPAddressAsync(name, AddressFamily.InterNetwork);
-                    var v6task = resolver.ResolveIPAddressAsync(name, AddressFamily.InterNetworkV6);
+                    var v4task = resolver.ResolveIPAddressesAsync(name, AddressFamily.InterNetwork);
+                    var v6task = resolver.ResolveIPAddressesAsync(name, AddressFamily.InterNetworkV6);
                     result.ResolverResult = (await v6task).Select(x => x.Address).Concat((await v4task).Select(x => x.Address)).ToArray();
+                    // result.ResolverResult = ((await v4task).Select(x => x.Address)).ToArray();
                     Array.Sort(result.ResolverResult, CompareIpAddresses);
                 }
                 catch (Exception ex)

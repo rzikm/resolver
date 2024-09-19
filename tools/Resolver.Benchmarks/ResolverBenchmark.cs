@@ -5,19 +5,19 @@ public class ResolverVsOsBenchmark
 
     public ResolverVsOsBenchmark()
     {
-        _resolver = new Resolver();
+        _resolver = new();
         _resolver.Timeout = TimeSpan.FromSeconds(5);
 
         _dnsClient = new LookupClient();
     }
 
-    private readonly Resolver _resolver;
+    private readonly Resolver.Resolver _resolver;
     private readonly LookupClient _dnsClient;
 
     [Benchmark]
     public async Task<AddressResult[]> Resolver()
     {
-        return await _resolver.ResolveIPAddressAsync(Host, AddressFamily.InterNetwork);
+        return await _resolver.ResolveIPAddressesAsync(Host, AddressFamily.InterNetwork);
     }
 
     [Benchmark(Baseline = true)]
